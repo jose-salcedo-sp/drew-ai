@@ -13,6 +13,8 @@ anyhow = "1.0.104"
 async-trait = "0.1.92"
 aws-config = { version = "1.12.0", features = ["behavior-version-latest"] }
 aws-sdk-bedrockruntime = "1.148.0"
+# Names `Document`, the JSON type of Bedrock tool schemas and tool-use input; the SDK does not re-export it.
+aws-smithy-types = "1.8.1"
 axum = "0.8.9"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }

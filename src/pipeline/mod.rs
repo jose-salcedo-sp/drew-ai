@@ -1,6 +1,8 @@
 //! Typestate pipeline with a Writer-style trace. See `docs/design.md` section 5.
 
+pub mod answerer;
 pub mod report;
+pub mod steps;
 pub mod trace;
 
 use std::{future::Future, marker::PhantomData, time::Instant};
@@ -293,7 +295,6 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
     }
 
     /// Restructures the state without a step. Not traced, so only for plumbing between steps.
-    #[expect(dead_code, reason = "first caller is the classification join")]
     pub(crate) fn map<TNext: Send>(self, f: impl FnOnce(TState) -> TNext) -> Run<TCategory, TNext> {
         Run {
             id: self.id,
@@ -305,10 +306,6 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
     }
 
     /// Re-tags the run with the category decided by `Classify`. Only the classification join may call this.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first caller is the classification join")
-    )]
     pub(crate) fn classified<TNext: Category>(self) -> Run<TNext, TState> {
         Run {
             id: self.id,
