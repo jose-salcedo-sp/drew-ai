@@ -326,19 +326,16 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn jira_and_slack_units_are_not_expanded(pool: PgPool) {
-    let issue = document(&pool, SourceKind::Jira, "ARM-11", "SU24 import").await;
-    let description = SeedChunk::new(&issue, "description", 0, "SU24 import fails.")
+async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgPool) {
+    let issue = document(&pool, SourceKind::Jira, "ARM-11", "ARM-11: import fails").await;
+    let summary = SeedChunk::new(&issue, "issue-1", 0, "Import fails on the role upload.")
         .insert(&pool)
         .await;
-    SeedChunk::new(&issue, "comment-1", 1, "Fixed by a note.")
+    let answer = SeedChunk::new(&issue, "issue-2", 1, "Drew: SU24 data was missing.")
         .insert(&pool)
         .await;
     let thread = document(&pool, SourceKind::Slack, "C1:2.0", "thread").await;
-    let question = SeedChunk::new(&thread, "2.0", 0, "Is SU24 transported?")
-        .insert(&pool)
-        .await;
-    SeedChunk::new(&thread, "2.1", 1, "Yes, with the role.")
+    let question = SeedChunk::new(&thread, "thread", 0, "Is SU24 transported? Yes.")
         .insert(&pool)
         .await;
 
@@ -348,7 +345,9 @@ async fn jira_and_slack_units_are_not_expanded(pool: PgPool) {
         .unwrap();
     let mut found = ids(&results);
     found.sort();
-    assert_eq!(found, [description.0.as_str(), question.0.as_str()]);
+    let mut expected = [summary.0.as_str(), answer.0.as_str(), question.0.as_str()];
+    expected.sort();
+    assert_eq!(found, expected);
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]

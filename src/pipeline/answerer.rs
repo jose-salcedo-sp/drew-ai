@@ -3,11 +3,19 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use sqlx::PgPool;
 
 use crate::{
     domain::{CategoryKind, Chunk, Provenance, Question},
-    llm::ChatModel,
-    retrieval::{Retrieved, Retriever},
+    llm::{
+        ChatModel,
+        bedrock_chat::{BedrockChat, ChatArgs},
+        bedrock_embed::{BedrockEmbedder, EmbedArgs},
+    },
+    retrieval::{
+        Retrieved, Retriever,
+        hybrid::{HybridConfig, HybridRetriever},
+    },
 };
 
 use super::{
@@ -26,6 +34,14 @@ pub enum Classified {
     Choice(Run<Choice, Reranked>),
     Ranking(Run<Ranking, Reranked>),
     Open(Run<Open, Reranked>),
+}
+
+#[derive(Clone, Debug, clap::Args)]
+pub struct PipelineArgs {
+    #[command(flatten)]
+    pub embed: EmbedArgs,
+    #[command(flatten)]
+    pub chat: ChatArgs,
 }
 
 pub struct PipelineAnswerer {
@@ -49,6 +65,14 @@ impl PipelineAnswerer {
             rerank_open: Rerank::default(),
             open: Seq(Explain::new(explain), Verify::new()),
         }
+    }
+
+    /// Hybrid retrieval with Bedrock embeddings, and Bedrock for `Explain`.
+    pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> anyhow::Result<Self> {
+        let embedder = Arc::new(BedrockEmbedder::from_args(&args.embed).await?);
+        let retriever = HybridRetriever::new(pool, embedder, HybridConfig::default());
+        let explain = BedrockChat::from_args(&args.chat).await;
+        Ok(Self::new(Arc::new(retriever), Arc::new(explain)))
     }
 
     async fn classify(&self, question: Question) -> Result<Classified, Halted> {

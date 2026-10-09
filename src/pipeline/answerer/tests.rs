@@ -216,6 +216,11 @@ async fn invalid_json_declines_with_the_raw_output_in_the_trace() {
         &explain.record,
         Some(TraceRecord::Explain(r)) if r.raw.as_deref() == Some("Sure! AGR_USERS, I think.")
     ));
+    assert_eq!(
+        explain.model.as_ref().map(|m| m.id.as_str()),
+        Some("fake-scripted-chat")
+    );
+    assert_eq!(explain.prompt_version.as_deref(), Some(PROMPT_VERSION));
 }
 
 #[tokio::test]

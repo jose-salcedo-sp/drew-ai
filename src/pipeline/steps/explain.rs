@@ -146,13 +146,20 @@ impl Step for Explain<Open> {
             temperature: 0.0,
             json_schema: Some(schema()),
         };
-        let response = self.chat.complete(request).await?;
+        let model = self.chat.model();
+        let response =
+            self.chat.complete(request).await.map_err(|error| {
+                StepError::from(error).with_model(model.clone(), PROMPT_VERSION)
+            })?;
         let record = ExplainRecord {
             raw: Some(response.text.clone()),
             contradicts_verdict: false,
         };
-        let explanation = parse(&response.text)
-            .map_err(|reason| StepError::decline(reason).with_record(record.clone()))?;
+        let explanation = parse(&response.text).map_err(|reason| {
+            StepError::decline(reason)
+                .with_record(record.clone())
+                .with_model(model.clone(), PROMPT_VERSION)
+        })?;
         Ok(Scored::new(
             Explained {
                 explanation,
@@ -160,7 +167,7 @@ impl Step for Explain<Open> {
             },
             record,
         )
-        .with_model(self.chat.model(), PROMPT_VERSION))
+        .with_model(model, PROMPT_VERSION))
     }
 }
 

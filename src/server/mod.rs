@@ -13,7 +13,6 @@ mod tests;
 use std::{convert::Infallible, sync::Arc};
 
 use anyhow::Context;
-use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State, rejection::JsonRejection},
@@ -28,10 +27,10 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
-    domain::{Question, RunId, UserId},
+    domain::{RunId, UserId},
     pipeline::{
+        answerer::{PipelineAnswerer, PipelineArgs},
         report::{Answerer, Outcome, RunReport},
-        trace::Trace,
     },
     store::{self, DbArgs, RunStore, StoredRun, runs::PgRunStore},
 };
@@ -51,6 +50,8 @@ pub struct Args {
     /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
     #[arg(long, env = "DREW_API_KEYS", hide_env_values = true)]
     pub api_keys: ApiKeys,
+    #[command(flatten)]
+    pub pipeline: PipelineArgs,
 }
 
 #[derive(Clone)]
@@ -71,9 +72,9 @@ pub fn router(state: AppState) -> Router {
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
     let pool = store::connect(&args.db).await?;
+    let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
     let state = AppState {
-        // INTEGRATION: replace `UnwiredAnswerer` with the pipeline's `Answerer` once it merges.
-        answerer: Arc::new(UnwiredAnswerer),
+        answerer: Arc::new(answerer),
         runs: Arc::new(PgRunStore::new(pool)),
         keys: Arc::new(args.api_keys),
     };
@@ -85,25 +86,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-/// Placeholder `Answerer` until the pipeline is wired in: every run fails, and is still persisted.
-struct UnwiredAnswerer;
-
-#[async_trait]
-impl Answerer for UnwiredAnswerer {
-    async fn answer(&self, question: Question) -> RunReport {
-        RunReport {
-            id: RunId::new(),
-            question,
-            category: None,
-            outcome: Outcome::Failed {
-                at: "pipeline".into(),
-                error: "pipeline not wired".into(),
-            },
-            trace: Trace::default(),
-        }
-    }
 }
 
 /// As PID 1 in a container the process gets no default SIGTERM handler, so it has to exit on SIGTERM itself.

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use chrono::Utc;
 
 use super::{
@@ -9,13 +10,16 @@ use super::{
     *,
 };
 use crate::{
-    domain::{AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Provenance, Score},
+    domain::{
+        AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Provenance, Question,
+        RunId, Score,
+    },
     pipeline::{
         DeclineReason,
-        report::{Answer, CannedAnswerer, Citation, Verdict},
+        report::{Answer, CannedAnswerer, Citation, Outcome, RunReport, Verdict},
         trace::{
-            ClassifyRecord, RankedChunk, RerankRecord, RetrieveRecord, StepOutcome, TraceEntry,
-            TraceRecord,
+            ClassifyRecord, RankedChunk, RerankRecord, RetrieveRecord, StepOutcome, Trace,
+            TraceEntry, TraceRecord,
         },
     },
 };
@@ -680,7 +684,13 @@ async fn golden_parse_errors_surface_through_the_run_command() {
     let golden_path = dir.join("golden.jsonl");
     fs::write(&golden_path, "\n{}\n").unwrap();
     let error = run_golden(
-        Arc::new(Unwired),
+        Arc::new(CannedAnswerer {
+            category: None,
+            outcome: Outcome::Failed {
+                at: "pipeline".into(),
+                error: "unused".into(),
+            },
+        }),
         RunArgs {
             golden: golden_path,
             out: dir.join("out.json"),

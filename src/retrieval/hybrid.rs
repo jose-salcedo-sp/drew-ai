@@ -178,7 +178,7 @@ impl HybridRetriever {
         Ok(ids.into_iter().map(ChunkId).collect())
     }
 
-    /// Current rows for `hits`, plus the adjacent current sections (by ordinal) of every Confluence hit.
+    /// Current rows for `hits`, plus the adjacent current chunks (by ordinal) of each hit's document.
     async fn fetch_with_neighbours(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -187,8 +187,8 @@ impl HybridRetriever {
         sqlx::query_as(
             "WITH pages AS (
                  SELECT c.document_id, c.ordinal
-                 FROM chunks c JOIN documents d ON d.id = c.document_id
-                 WHERE c.superseded_at IS NULL AND c.id = ANY($1) AND d.source = 'confluence'
+                 FROM chunks c
+                 WHERE c.superseded_at IS NULL AND c.id = ANY($1)
              ),
              neighbours AS (
                  SELECT n.id FROM pages h CROSS JOIN LATERAL (
@@ -276,10 +276,11 @@ pub fn reciprocal_rank_fusion(lists: &[&[ChunkId]], k: f64) -> Vec<(ChunkId, f64
 
 /// Expands fused hits (best first) to their parent units and dedupes by chunk id.
 ///
-/// Every hit is kept. A Confluence hit also pulls in the previous and next current sections of its page (ordinal ±1
-/// when ordinals are dense), each scored one step below the hit, while the page has fewer than `max_per_document`
-/// chunks in the result; the cap never drops a hit. Jira issues and Slack threads are whole units and are not
-/// expanded. A chunk reached twice keeps its best score, and the result is sorted best first.
+/// Every hit is kept. A hit also pulls in the previous and next current chunks of its document (ordinal ±1 when
+/// ordinals are dense): neighbouring Confluence sections, or neighbouring parts of a Jira issue split on comment
+/// boundaries. Each is scored one step below the hit, while the document has fewer than `max_per_document` chunks
+/// in the result; the cap never drops a hit. Single-chunk units (Slack threads, most Jira issues) have no neighbours.
+/// A chunk reached twice keeps its best score, and the result is sorted best first.
 fn expand(
     hits: &[(ChunkId, f64)],
     rows: Vec<ChunkRow>,
@@ -290,12 +291,10 @@ fn expand(
     for row in rows {
         let ordinal = row.ordinal;
         let chunk = Chunk::try_from(row)?;
-        if chunk.source == SourceKind::Confluence {
-            pages
-                .entry(chunk.document_id.clone())
-                .or_default()
-                .push((ordinal, chunk.id.clone()));
-        }
+        pages
+            .entry(chunk.document_id.clone())
+            .or_default()
+            .push((ordinal, chunk.id.clone()));
         chunks.insert(chunk.id.clone(), chunk);
     }
     pages.values_mut().for_each(|page| page.sort());

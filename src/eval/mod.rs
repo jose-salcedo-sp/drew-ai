@@ -7,14 +7,13 @@ pub mod tune;
 use std::{fs, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
-use async_trait::async_trait;
 
 use crate::{
-    domain::{Question, RunId},
     pipeline::{
-        report::{Answerer, Outcome, RunReport},
-        trace::Trace,
+        answerer::{PipelineAnswerer, PipelineArgs},
+        report::Answerer,
     },
+    store::{self, DbArgs},
 };
 
 use self::{
@@ -31,9 +30,19 @@ pub struct Args {
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Answer every golden question and report per-step metrics.
-    Run(RunArgs),
+    Run(RunCommand),
     /// Re-apply candidate thresholds to a results file's recorded scores.
     Tune(TuneArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RunCommand {
+    #[command(flatten)]
+    pub files: RunArgs,
+    #[command(flatten)]
+    pub db: DbArgs,
+    #[command(flatten)]
+    pub pipeline: PipelineArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -67,27 +76,12 @@ pub struct TuneArgs {
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
     match args.command {
-        Command::Run(args) => run_golden(Arc::new(Unwired), args).await,
-        Command::Tune(args) => run_tune(args),
-    }
-}
-
-/// Placeholder until the pipeline branch merges: integration replaces it in `run` with the real `Answerer`.
-struct Unwired;
-
-#[async_trait]
-impl Answerer for Unwired {
-    async fn answer(&self, question: Question) -> RunReport {
-        RunReport {
-            id: RunId::new(),
-            question,
-            category: None,
-            outcome: Outcome::Failed {
-                at: "pipeline".into(),
-                error: "pipeline not wired".into(),
-            },
-            trace: Trace::default(),
+        Command::Run(args) => {
+            let pool = store::connect(&args.db).await?;
+            let answerer = PipelineAnswerer::from_args(pool, &args.pipeline).await?;
+            run_golden(Arc::new(answerer), args.files).await
         }
+        Command::Tune(args) => run_tune(args),
     }
 }
 
