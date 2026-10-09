@@ -1,0 +1,29 @@
+{
+  "issues": [
+    {
+      "id": "10011",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10011",
+      "key": "ARM-2",
+      "fields": {
+        "summary": "Question about PFCG",
+        "description": null,
+        "updated": "2026-10-08T09:00:00.000+0000",
+        "labels": [],
+        "project": { "id": "10000", "key": "ARM", "name": "Access Risk Management" }
+      }
+    },
+    {
+      "id": "10012",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10012",
+      "key": "ARM-3",
+      "fields": {
+        "summary": "Can SU01 reset locked users?",
+        "description": null,
+        "updated": "2026-10-09T08:00:00.000+0000",
+        "labels": ["drew-public"],
+        "project": { "id": "10000", "key": "ARM", "name": "Access Risk Management" }
+      }
+    }
+  ],
+  "isLast": true
+}

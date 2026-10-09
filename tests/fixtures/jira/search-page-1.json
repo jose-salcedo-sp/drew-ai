@@ -1,0 +1,53 @@
+{
+  "issues": [
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10010",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10010",
+      "key": "ARM-1",
+      "fields": {
+        "summary": "Role sync drops AGR_USERS rows",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [{ "type": "text", "text": "Nightly sync loses rows for composite roles." }]
+            }
+          ]
+        },
+        "updated": "2026-10-01T10:00:00.000+0000",
+        "labels": ["customer-acme", "drew-confidential"],
+        "security": {
+          "self": "https://example.atlassian.net/rest/api/3/securitylevel/10100",
+          "id": "10100",
+          "description": "Visible to the ARM team only",
+          "name": "Internal Only"
+        },
+        "project": {
+          "self": "https://example.atlassian.net/rest/api/3/project/10000",
+          "id": "10000",
+          "key": "ARM",
+          "name": "Access Risk Management",
+          "projectTypeKey": "software"
+        }
+      }
+    },
+    {
+      "id": "10011",
+      "self": "https://example.atlassian.net/rest/api/3/issue/10011",
+      "key": "ARM-2",
+      "fields": {
+        "summary": "Question about PFCG",
+        "description": null,
+        "updated": "2026-10-02T11:00:00.000+0000",
+        "labels": [],
+        "security": null,
+        "project": { "id": "10000", "key": "ARM", "name": "Access Risk Management" }
+      }
+    }
+  ],
+  "nextPageToken": "page-2",
+  "isLast": false
+}
