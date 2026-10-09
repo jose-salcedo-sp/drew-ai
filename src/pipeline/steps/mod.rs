@@ -9,7 +9,7 @@ mod verify;
 pub use self::{
     classify::{CLASSIFY_PROMPT_VERSION, Classify},
     explain::{Claim, Explain, Explained, Explanation, InvalidExplanation, PROMPT_VERSION},
-    rerank::Rerank,
+    rerank::{RERANK_PROMPT_VERSION, Rerank},
     retrieve::Retrieve,
     verify::{Verified, VerifiedAnswer, Verify},
 };

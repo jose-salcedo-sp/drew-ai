@@ -13,12 +13,12 @@ v1 is a demo for four internal users. What works today:
 
 - Batch ingestion from Confluence, Jira, and Slack into Postgres with pgvector.
 - Hybrid retrieval (full text + vectors, reciprocal rank fusion).
-- Classify on a System One model ([Kev](https://github.com/jaredpalmer/kev)), with a calibrated confidence score.
+- Classify and Rerank on a System One model ([Kev](https://github.com/jaredpalmer/kev)), with calibrated confidence scores.
 - The `open` path end to end: retrieve, rerank, explain with an LLM, verify every citation.
 - The HTTP API, run persistence with full traces, and `drew eval`.
 - Models on Bedrock, or fully local: Ollama for embeddings and Explain, Kev for System One.
 
-Not built yet: the Answer step (milestone 6), so `boolean`, `choice`, and `ranking` questions are classified but answered through the `open` path; a reranking model (milestone 5); confidence thresholds; and permission enforcement.
+Not built yet: the Answer step (milestone 6), so `boolean`, `choice`, and `ranking` questions are classified but answered through the `open` path; confidence thresholds; and permission enforcement.
 
 ## How a question is answered
 
@@ -76,7 +76,7 @@ The answer is in `choices[0].message.content`. The top-level `drew` object carri
   uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b@v1.0 --port 8009
   ```
 
-  Without `DREW_SYSTEM_ONE_URL`, every question is classified `open`.
+  Without `DREW_SYSTEM_ONE_URL`, every question is classified `open` and Rerank keeps the top 5 matches by retrieval score.
 
 Switching embedding models (for example from Bedrock to `bge-m3`) requires `drew ingest --reembed`, because vectors from different models are never mixed.
 

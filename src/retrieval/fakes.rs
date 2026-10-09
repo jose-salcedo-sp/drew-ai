@@ -26,6 +26,7 @@ impl Retriever for KeywordRetriever {
                 (shared > 0).then(|| Retrieved {
                     chunk: chunk.clone(),
                     score: Score(shared as f32 / query.len() as f32),
+                    context_for: None,
                 })
             })
             .collect();

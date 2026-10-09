@@ -305,7 +305,7 @@ fn expand(
             .get(id)
             .ok_or_else(|| anyhow!("hit {} has no current row", id.0))?;
         let score = *fused as f32;
-        result.add(hit, score);
+        result.add(hit, score, None);
         let Some(page) = pages.get(&hit.document_id) else {
             continue;
         };
@@ -324,7 +324,7 @@ fn expand(
             if result.count(&hit.document_id) >= max_per_document {
                 break;
             }
-            result.add(&chunks[neighbour], score.next_down());
+            result.add(&chunks[neighbour], score.next_down(), Some(id));
         }
     }
     let mut out = result.out;
@@ -340,9 +340,16 @@ struct Expansion {
 }
 
 impl Expansion {
-    fn add(&mut self, chunk: &Chunk, score: f32) {
+    /// A chunk that is a match anywhere stays a match, even if it was first added as another match's context.
+    fn add(&mut self, chunk: &Chunk, score: f32, context_for: Option<&ChunkId>) {
         match self.position.get(&chunk.id) {
-            Some(&i) => self.out[i].score = Score(self.out[i].score.0.max(score)),
+            Some(&i) => {
+                let existing = &mut self.out[i];
+                existing.score = Score(existing.score.0.max(score));
+                if context_for.is_none() {
+                    existing.context_for = None;
+                }
+            }
             None => {
                 self.position.insert(chunk.id.clone(), self.out.len());
                 *self
@@ -352,6 +359,7 @@ impl Expansion {
                 self.out.push(Retrieved {
                     chunk: chunk.clone(),
                     score: Score(score),
+                    context_for: context_for.cloned(),
                 });
             }
         }

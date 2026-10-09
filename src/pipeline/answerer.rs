@@ -72,14 +72,28 @@ impl PipelineAnswerer {
         }
     }
 
-    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` on System One when configured.
+    pub fn with_reranker(self, system_one: Arc<dyn SystemOne>) -> Self {
+        let defaults = Rerank::<Open>::default();
+        Self {
+            rerank_open: Rerank::new(defaults.top_k(), defaults.candidates(), Some(system_one)),
+            ..self
+        }
+    }
+
+    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Rerank` on System One
+    /// when configured.
     pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> anyhow::Result<Self> {
         let embedder = llm::embedder(&args.embed).await?;
         let retriever = HybridRetriever::new(pool, embedder, HybridConfig::default());
         let explain = llm::explain_model(&args.chat).await;
         let answerer = Self::new(Arc::new(retriever), explain);
         Ok(match HttpSystemOne::from_args(&args.system_one) {
-            Some(system_one) => answerer.with_classifier(Arc::new(system_one)),
+            Some(system_one) => {
+                let system_one: Arc<dyn SystemOne> = Arc::new(system_one);
+                answerer
+                    .with_classifier(system_one.clone())
+                    .with_reranker(system_one)
+            }
             None => answerer,
         })
     }

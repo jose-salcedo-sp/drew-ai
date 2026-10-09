@@ -348,6 +348,18 @@ async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgP
     let mut expected = [summary.0.as_str(), answer.0.as_str(), question.0.as_str()];
     expected.sort();
     assert_eq!(found, expected);
+
+    let context_for = |id: &str| {
+        results
+            .iter()
+            .find(|hit| hit.chunk.id.0 == id)
+            .unwrap()
+            .context_for
+            .clone()
+    };
+    assert_eq!(context_for(&summary.0), Some(answer.clone()));
+    assert_eq!(context_for(&answer.0), None);
+    assert_eq!(context_for(&question.0), None);
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]

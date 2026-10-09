@@ -355,3 +355,62 @@ async fn a_boolean_question_takes_the_open_path_and_keeps_its_category() {
         Some("fake-system-one")
     );
 }
+
+#[tokio::test]
+async fn the_reranker_asks_system_one_about_each_match() {
+    use std::{
+        collections::BTreeMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::llm::{
+        ModelRef,
+        system_one::{DecisionAnswer, DecisionRequest, DecisionResponse, SystemOne},
+    };
+
+    #[derive(Default)]
+    struct Counting(AtomicUsize);
+
+    #[async_trait]
+    impl SystemOne for Counting {
+        fn model(&self) -> ModelRef {
+            ModelRef::new("counting", "1")
+        }
+
+        async fn decide(&self, request: DecisionRequest) -> anyhow::Result<DecisionResponse> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let answer = match request.questions.keys().next().map(String::as_str) {
+                Some("category") => DecisionAnswer::Choice {
+                    choice: "open".into(),
+                    confidence: 0.9,
+                    probabilities: BTreeMap::from([("open".into(), 0.95)]),
+                },
+                _ => DecisionAnswer::Noul { noul: 0.7 },
+            };
+            let id = request.questions.into_keys().next().unwrap();
+            Ok(DecisionResponse {
+                answers: BTreeMap::from([(id, answer)]),
+            })
+        }
+    }
+
+    let agr = agr_users();
+    let chat = Arc::new(ScriptedChat::replying([reply(json!([
+        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
+    ]))]));
+    let system_one = Arc::new(Counting::default());
+    let report = answerer(corpus(), &chat)
+        .with_classifier(system_one.clone())
+        .with_reranker(system_one.clone())
+        .answer(Question::new(QUESTION))
+        .await;
+
+    let rerank = report
+        .trace
+        .entries()
+        .iter()
+        .find(|e| e.step == "rerank")
+        .unwrap();
+    assert!(rerank.model.is_some(), "{:?}", rerank);
+    assert!(system_one.0.load(Ordering::SeqCst) > 1);
+}

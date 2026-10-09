@@ -273,7 +273,7 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 2. Hybrid retrieval, measured by recall@50.
 3. `open` end to end as the baseline: `Retrieve` → `Explain` → `Verify`, with every question treated as `open` and `Rerank` stubbed as top-5 by fused score.
 4. `Classify`: one System One choice question over the four categories, scored by its calibrated probability. Until `Answer` exists, `boolean`, `choice`, and `ranking` questions are answered through the `open` path, and the run keeps the classified category.
-5. `Rerank`.
+5. `Rerank`: one System One yes/no question per match ("does this text help answer the question?") over the top 25 matches by fused score; the probability of yes ranks them and scores the step. Neighbouring sections added by retrieval are context for their match, not candidates of their own.
 6. `Answer` with thresholds and declines.
 7. Launch-gate evaluation.
 
