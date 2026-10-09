@@ -135,6 +135,8 @@ pub enum DeclineReason {
 pub struct StepError {
     pub kind: StepErrorKind,
     pub record: Option<TraceRecord>,
+    pub model: Option<ModelRef>,
+    pub prompt_version: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -148,12 +150,22 @@ impl StepError {
         Self {
             kind: StepErrorKind::Decline(reason),
             record: None,
+            model: None,
+            prompt_version: None,
         }
     }
 
     pub fn with_record(self, record: impl Into<TraceRecord>) -> Self {
         Self {
             record: Some(record.into()),
+            ..self
+        }
+    }
+
+    pub fn with_model(self, model: ModelRef, prompt_version: &'static str) -> Self {
+        Self {
+            model: Some(model),
+            prompt_version: Some(prompt_version),
             ..self
         }
     }
@@ -164,6 +176,8 @@ impl<E: Into<anyhow::Error>> From<E> for StepError {
         Self {
             kind: StepErrorKind::Failed(error.into()),
             record: None,
+            model: None,
+            prompt_version: None,
         }
     }
 }
@@ -386,7 +400,12 @@ async fn execute<TStep: Step>(
                 },
             };
             (
-                entry(outcome_of(&halt), error.record, None, None),
+                entry(
+                    outcome_of(&halt),
+                    error.record,
+                    error.model,
+                    error.prompt_version,
+                ),
                 Err(halt),
             )
         }
