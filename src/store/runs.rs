@@ -1,1 +1,105 @@
 //! `RunStore` over the `pipeline_runs` table.
+
+use anyhow::Context;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sqlx::{PgPool, Row, types::Json};
+
+use crate::{
+    domain::{CategoryKind, Question, RunId, UserId},
+    pipeline::{
+        report::{Outcome, RunReport},
+        trace::Trace,
+    },
+};
+
+use super::{RunStore, StoredRun};
+
+pub struct PgRunStore {
+    pool: PgPool,
+}
+
+impl PgRunStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+/// The `pipeline_runs.status` value for an outcome.
+pub fn status(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Answered(_) => "answered",
+        Outcome::Declined { .. } => "declined",
+        Outcome::Failed { .. } => "failed",
+    }
+}
+
+fn category_name(category: CategoryKind) -> &'static str {
+    match category {
+        CategoryKind::Boolean => "boolean",
+        CategoryKind::Choice => "choice",
+        CategoryKind::Ranking => "ranking",
+        CategoryKind::Open => "open",
+    }
+}
+
+fn parse_category(name: &str) -> anyhow::Result<CategoryKind> {
+    Ok(match name {
+        "boolean" => CategoryKind::Boolean,
+        "choice" => CategoryKind::Choice,
+        "ranking" => CategoryKind::Ranking,
+        "open" => CategoryKind::Open,
+        other => anyhow::bail!("unknown category {other:?}"),
+    })
+}
+
+#[async_trait]
+impl RunStore for PgRunStore {
+    async fn save(&self, user: &UserId, report: &RunReport) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO pipeline_runs (id, user_id, question, category, status, outcome, trace)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(report.id.as_uuid())
+        .bind(&user.0)
+        .bind(report.question.as_str())
+        .bind(report.category.map(category_name))
+        .bind(status(&report.outcome))
+        .bind(Json(&report.outcome))
+        .bind(Json(&report.trace))
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("saving run {}", report.id))?;
+        Ok(())
+    }
+
+    async fn get(&self, id: RunId) -> anyhow::Result<Option<StoredRun>> {
+        let row = sqlx::query(
+            "SELECT user_id, question, category, outcome, trace, created_at
+             FROM pipeline_runs WHERE id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("loading run {id}"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let category: Option<String> = row.try_get("category")?;
+        let Json(outcome): Json<Outcome> = row.try_get("outcome")?;
+        let Json(trace): Json<Trace> = row.try_get("trace")?;
+        let created_at: DateTime<Utc> = row.try_get("created_at")?;
+        Ok(Some(StoredRun {
+            user: UserId(row.try_get("user_id")?),
+            created_at,
+            report: RunReport {
+                id,
+                question: Question::new(row.try_get::<String, _>("question")?),
+                category: category.as_deref().map(parse_category).transpose()?,
+                outcome,
+                trace,
+            },
+        }))
+    }
+}
