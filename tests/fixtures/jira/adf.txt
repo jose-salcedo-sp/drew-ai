@@ -1,0 +1,29 @@
+Root cause
+
+@Alice Example the sync job reads `AGR_USERS` before the role transport (https://example.atlassian.net/browse/ARM-7) lands.
+See https://wiki.example.test/sync
+
+- Composite roles
+  - SAP_ALL
+- Single roles
+
+3. Stop the job
+4. Rerun it
+
+```sql
+SELECT * FROM AGR_USERS
+WHERE UNAME = 'X';
+```
+
+| Table | Purpose |
+| --- | --- |
+| AGR_USERS | User to role assignments |
+
+> Never edit it by hand.
+
+[x] Back up the table
+[ ] Patch the job
+
+---
+
+Done 2025-10-09 ✅

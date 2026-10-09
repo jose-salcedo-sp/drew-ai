@@ -1,0 +1,151 @@
+{
+  "type": "doc",
+  "version": 1,
+  "content": [
+    {
+      "type": "heading",
+      "attrs": { "level": 2 },
+      "content": [{ "type": "text", "text": "Root cause" }]
+    },
+    {
+      "type": "paragraph",
+      "content": [
+        { "type": "mention", "attrs": { "id": "alice-account", "text": "@Alice Example", "accessLevel": "" } },
+        { "type": "text", "text": " the sync job reads " },
+        { "type": "text", "text": "AGR_USERS", "marks": [{ "type": "code" }] },
+        { "type": "text", "text": " before the " },
+        {
+          "type": "text",
+          "text": "role transport",
+          "marks": [{ "type": "link", "attrs": { "href": "https://example.atlassian.net/browse/ARM-7" } }]
+        },
+        { "type": "text", "text": " lands." },
+        { "type": "hardBreak" },
+        { "type": "text", "text": "See " },
+        { "type": "inlineCard", "attrs": { "url": "https://wiki.example.test/sync" } }
+      ]
+    },
+    {
+      "type": "bulletList",
+      "content": [
+        {
+          "type": "listItem",
+          "content": [
+            { "type": "paragraph", "content": [{ "type": "text", "text": "Composite roles" }] },
+            {
+              "type": "bulletList",
+              "content": [
+                {
+                  "type": "listItem",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [{ "type": "text", "text": "SAP_ALL", "marks": [{ "type": "strong" }] }]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "listItem",
+          "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Single roles" }] }]
+        }
+      ]
+    },
+    {
+      "type": "orderedList",
+      "attrs": { "order": 3 },
+      "content": [
+        {
+          "type": "listItem",
+          "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Stop the job" }] }]
+        },
+        {
+          "type": "listItem",
+          "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Rerun it" }] }]
+        }
+      ]
+    },
+    {
+      "type": "codeBlock",
+      "attrs": { "language": "sql" },
+      "content": [{ "type": "text", "text": "SELECT * FROM AGR_USERS\nWHERE UNAME = 'X';" }]
+    },
+    {
+      "type": "table",
+      "attrs": { "isNumberColumnEnabled": false, "layout": "default" },
+      "content": [
+        {
+          "type": "tableRow",
+          "content": [
+            {
+              "type": "tableHeader",
+              "attrs": {},
+              "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Table" }] }]
+            },
+            {
+              "type": "tableHeader",
+              "attrs": {},
+              "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Purpose" }] }]
+            }
+          ]
+        },
+        {
+          "type": "tableRow",
+          "content": [
+            {
+              "type": "tableCell",
+              "attrs": {},
+              "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "AGR_USERS" }] }]
+            },
+            {
+              "type": "tableCell",
+              "attrs": {},
+              "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "User to role" }] },
+                { "type": "paragraph", "content": [{ "type": "text", "text": "assignments" }] }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "blockquote",
+      "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Never edit it by hand." }] }]
+    },
+    {
+      "type": "taskList",
+      "attrs": { "localId": "t1" },
+      "content": [
+        {
+          "type": "taskItem",
+          "attrs": { "localId": "t1-1", "state": "DONE" },
+          "content": [{ "type": "text", "text": "Back up the table" }]
+        },
+        {
+          "type": "taskItem",
+          "attrs": { "localId": "t1-2", "state": "TODO" },
+          "content": [{ "type": "text", "text": "Patch the job" }]
+        }
+      ]
+    },
+    {
+      "type": "mediaSingle",
+      "attrs": { "layout": "center" },
+      "content": [{ "type": "media", "attrs": { "id": "abc", "type": "file", "collection": "" } }]
+    },
+    { "type": "rule" },
+    {
+      "type": "paragraph",
+      "content": [
+        { "type": "text", "text": "Done " },
+        { "type": "date", "attrs": { "timestamp": "1759968000000" } },
+        { "type": "text", "text": " " },
+        { "type": "emoji", "attrs": { "shortName": ":white_check_mark:", "id": "2705", "text": "✅" } }
+      ]
+    }
+  ]
+}
