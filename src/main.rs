@@ -34,3 +34,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Eval(args) => eval::run(args).await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_is_well_formed() {
+        super::Cli::command().debug_assert();
+    }
+}

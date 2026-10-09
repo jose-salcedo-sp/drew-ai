@@ -8,6 +8,7 @@ use crate::domain::{Document, SourceKind};
 use super::Source;
 
 #[derive(Debug, clap::Args)]
+#[group(id = "confluence")]
 pub struct Args {}
 
 pub struct Connector {}
