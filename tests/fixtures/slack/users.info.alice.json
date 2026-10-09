@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "user": {
+    "id": "U0ALICE",
+    "team_id": "T0SAIL",
+    "name": "alice.wong",
+    "deleted": false,
+    "real_name": "Alice Wong",
+    "tz": "America/Chicago",
+    "profile": {
+      "real_name": "Alice Wong",
+      "display_name": "alice",
+      "real_name_normalized": "Alice Wong",
+      "display_name_normalized": "alice",
+      "team": "T0SAIL"
+    },
+    "is_admin": false,
+    "is_bot": false,
+    "updated": 1780000000
+  }
+}

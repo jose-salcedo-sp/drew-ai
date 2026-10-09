@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "user": {
+    "id": "U0BOB",
+    "team_id": "T0SAIL",
+    "name": "bob.builder",
+    "deleted": false,
+    "real_name": "Bob Builder",
+    "tz": "America/Chicago",
+    "profile": {
+      "real_name": "Bob Builder",
+      "display_name": "",
+      "real_name_normalized": "Bob Builder",
+      "display_name_normalized": "",
+      "team": "T0SAIL"
+    },
+    "is_admin": false,
+    "is_bot": false,
+    "updated": 1780000000
+  }
+}
