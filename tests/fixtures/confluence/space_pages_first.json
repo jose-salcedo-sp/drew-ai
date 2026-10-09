@@ -1,0 +1,40 @@
+{
+  "results": [
+    {
+      "parentType": "page",
+      "parentId": "100",
+      "spaceId": "98",
+      "ownerId": "557058:drew",
+      "lastOwnerId": null,
+      "createdAt": "2025-03-14T09:12:44.512Z",
+      "authorId": "557058:drew",
+      "position": 2,
+      "version": {
+        "number": 7,
+        "message": "",
+        "minorEdit": false,
+        "authorId": "5b10ac8d82e05b22cc7d4ef5",
+        "createdAt": "2026-10-02T15:04:05.000Z"
+      },
+      "body": {
+        "storage": {
+          "representation": "storage",
+          "value": "<p>AGR_USERS maps users to roles.</p><h2>Validity</h2><p>FROM_DAT and TO_DAT bound the assignment.</p>"
+        }
+      },
+      "status": "current",
+      "title": "AGR_USERS",
+      "id": "101",
+      "_links": {
+        "editui": "/pages/resumedraft.action?draftId=101",
+        "webui": "/spaces/ARM/pages/101/AGR_USERS",
+        "edituiv2": "/spaces/ARM/pages/edit-v2/101",
+        "tinyui": "/x/ZQAB"
+      }
+    }
+  ],
+  "_links": {
+    "next": "/wiki/api/v2/spaces/98/pages?body-format=storage&status=current&limit=250&cursor=eyJpZCI6IjEwMSJ9",
+    "base": "https://example.atlassian.net/wiki"
+  }
+}
