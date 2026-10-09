@@ -50,6 +50,8 @@ curl -s localhost:8080/v1/chat/completions \
   -d '{"model": "drew-ai", "messages": [{"role": "user", "content": "What does AGR_USERS store?"}]}'
 ```
 
+For an API client such as Yaak or Postman, import `clients/drew-ai.postman_collection.json`.
+
 The answer is in `choices[0].message.content`. The top-level `drew` object carries the run id, outcome, citations, and trace; `GET /v1/runs/{id}` returns a stored run.
 
 ### Running fully locally
