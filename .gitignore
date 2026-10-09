@@ -1,2 +1,4 @@
 /target
 .env
+*.visual-check.*
+.DS_Store

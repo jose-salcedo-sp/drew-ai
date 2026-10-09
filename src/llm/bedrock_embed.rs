@@ -19,13 +19,17 @@ const CONCURRENT_CALLS: usize = 8;
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct EmbedArgs {
-    /// Bedrock embedding model id: Titan Text Embeddings v2 or Cohere Embed v3. Region and credentials come from the default AWS chain.
+    /// Embedding model. On Bedrock: Titan Text Embeddings v2 or Cohere Embed v3, with region and credentials from the
+    /// default AWS chain. With `--embed-url`: a 1024-dimension model such as `bge-m3`.
     #[arg(
         long,
         env = "DREW_EMBED_MODEL",
         default_value = "amazon.titan-embed-text-v2:0"
     )]
     pub embed_model: String,
+    /// OpenAI-compatible base URL, e.g. Ollama at `http://localhost:11434/v1`. Unset: Bedrock.
+    #[arg(long, env = "DREW_EMBED_URL")]
+    pub embed_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

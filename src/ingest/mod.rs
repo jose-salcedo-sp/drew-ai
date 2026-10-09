@@ -10,10 +10,7 @@ use sqlx::PgPool;
 
 use crate::{
     domain::{Document, SourceKind},
-    llm::{
-        Embedder, ModelRef,
-        bedrock_embed::{BedrockEmbedder, EmbedArgs},
-    },
+    llm::{self, Embedder, ModelRef, bedrock_embed::EmbedArgs},
     store::{
         self, DbArgs,
         chunks::{ChunkStore, Stored},
@@ -47,7 +44,7 @@ pub struct Args {
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
     let pool = store::connect(&args.db).await?;
-    let embedder = BedrockEmbedder::from_args(&args.embed).await?;
+    let embedder = llm::embedder(&args.embed).await?;
 
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
     if let Some(connector) = confluence::Connector::from_args(&args.confluence)? {
@@ -61,7 +58,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     }
     anyhow::ensure!(!sources.is_empty(), "no sources are configured");
 
-    let reports = ingest(&pool, &embedder, &sources, args.reembed).await?;
+    let reports = ingest(&pool, embedder.as_ref(), &sources, args.reembed).await?;
     let failed: Vec<&str> = reports
         .iter()
         .filter(|r| r.error.is_some())

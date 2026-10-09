@@ -313,3 +313,45 @@ fn excerpt_cuts_long_text_on_a_char_boundary() {
     assert!(excerpt.ends_with('…'));
     assert_eq!(super::excerpt("short"), "short");
 }
+
+#[tokio::test]
+async fn a_boolean_question_takes_the_open_path_and_keeps_its_category() {
+    use std::collections::BTreeMap;
+
+    use crate::llm::system_one::{DecisionAnswer, DecisionResponse, ScriptedSystemOne};
+
+    let agr = agr_users();
+    let chat = Arc::new(ScriptedChat::replying([reply(json!([
+        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
+    ]))]));
+    let system_one = Arc::new(ScriptedSystemOne::new([Ok(DecisionResponse {
+        answers: BTreeMap::from([(
+            "category".into(),
+            DecisionAnswer::Choice {
+                choice: "boolean".into(),
+                confidence: 0.8,
+                probabilities: BTreeMap::from([("boolean".into(), 0.9)]),
+            },
+        )]),
+    })]));
+
+    let report = answerer(corpus(), &chat)
+        .with_classifier(system_one)
+        .answer(Question::new("Does AGR_USERS map users to roles?"))
+        .await;
+
+    let Outcome::Answered(answer) = &report.outcome else {
+        panic!("expected an answer, got {:?}", report.outcome);
+    };
+    assert_eq!(report.category, Some(CategoryKind::Boolean));
+    assert_eq!(answer.verdict, None);
+    let classify = &report.trace.entries()[0];
+    assert!(matches!(
+        classify.outcome,
+        StepOutcome::Passed { score: Some(score), .. } if score.0 == 0.9
+    ));
+    assert_eq!(
+        classify.model.as_ref().map(|m| m.id.as_str()),
+        Some("fake-system-one")
+    );
+}

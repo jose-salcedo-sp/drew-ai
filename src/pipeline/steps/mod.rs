@@ -7,7 +7,7 @@ mod retrieve;
 mod verify;
 
 pub use self::{
-    classify::Classify,
+    classify::{CLASSIFY_PROMPT_VERSION, Classify},
     explain::{Claim, Explain, Explained, Explanation, InvalidExplanation, PROMPT_VERSION},
     rerank::Rerank,
     retrieve::Retrieve,

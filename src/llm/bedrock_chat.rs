@@ -22,9 +22,13 @@ const RESPOND_TOOL: &str = "respond";
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ChatArgs {
-    /// Bedrock model or inference profile id for `Explain`, e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`.
+    /// Model for `Explain`: a Bedrock model or inference profile id, e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+    /// or with `--explain-url` the server's model name, e.g. `qwen3:14b`.
     #[arg(long, env = "DREW_EXPLAIN_MODEL")]
     pub explain_model: String,
+    /// OpenAI-compatible base URL, e.g. Ollama at `http://localhost:11434/v1`. Unset: Bedrock.
+    #[arg(long, env = "DREW_EXPLAIN_URL")]
+    pub explain_url: Option<String>,
 }
 
 pub struct BedrockChat {

@@ -47,8 +47,8 @@ Ingestion:
 | Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `server`, `eval` |
 | Store | Postgres + pgvector (Docker Compose for the demo; Aurora later, where native RLS covers the security phase) |
 | Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (SAP identifiers like `S_TCODE`, `AGR_USERS` embed poorly) |
-| Embeddings, "why" LLM | Amazon Bedrock (AI Council approved), dev AWS account |
-| System One | Local OpenAI-compatible server (llama.cpp / vLLM) over HTTP; SageMaker later is a URL change |
+| Embeddings, "why" LLM | Amazon Bedrock (AI Council approved), dev AWS account. For local development, any OpenAI-compatible server (Ollama, llama.cpp), e.g. `bge-m3` and `qwen3:14b` |
+| System One | TypeSafe's System One API (`POST /v1/systemone`): yes/no, choice, and score questions over a text, answered with calibrated probabilities. Served locally by [Kev](https://github.com/jaredpalmer/kev) (MLX on Apple Silicon); a hosted endpoint later is a URL change |
 | Libraries | `axum`, `sqlx`, `pgvector`, `aws-sdk-bedrockruntime`, `reqwest`, `serde` |
 
 ## 4. API
@@ -272,7 +272,7 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 1. Ingestion and storage, plus the golden set.
 2. Hybrid retrieval, measured by recall@50.
 3. `open` end to end as the baseline: `Retrieve` → `Explain` → `Verify`, with every question treated as `open` and `Rerank` stubbed as top-5 by fused score.
-4. `Classify`.
+4. `Classify`: one System One choice question over the four categories, scored by its calibrated probability. Until `Answer` exists, `boolean`, `choice`, and `ranking` questions are answered through the `open` path, and the run keeps the classified category.
 5. `Rerank`.
 6. `Answer` with thresholds and declines.
 7. Launch-gate evaluation.
@@ -294,4 +294,4 @@ Designed, not built:
 
 - Confidence threshold values per step and category (set by `drew eval`).
 - Which Bedrock embedding model (Titan vs Cohere Embed), chosen by retrieval recall in milestone 2.
-- Which System One model (Laya or another), chosen by milestone 4–6 metrics.
+- Which System One model: Kev size (0.8B, 4B, 9B, 27B), a Kev fine-tuned on the golden set, Laya, or a hosted Jev, chosen by milestone 4–6 metrics.

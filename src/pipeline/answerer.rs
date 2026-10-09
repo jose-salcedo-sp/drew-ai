@@ -8,9 +8,10 @@ use sqlx::PgPool;
 use crate::{
     domain::{CategoryKind, Chunk, Provenance, Question},
     llm::{
-        ChatModel,
-        bedrock_chat::{BedrockChat, ChatArgs},
-        bedrock_embed::{BedrockEmbedder, EmbedArgs},
+        self, ChatModel,
+        bedrock_chat::ChatArgs,
+        bedrock_embed::EmbedArgs,
+        system_one::{HttpSystemOne, SystemOne, SystemOneArgs},
     },
     retrieval::{
         Retrieved, Retriever,
@@ -42,68 +43,68 @@ pub struct PipelineArgs {
     pub embed: EmbedArgs,
     #[command(flatten)]
     pub chat: ChatArgs,
+    #[command(flatten)]
+    pub system_one: SystemOneArgs,
 }
 
 pub struct PipelineAnswerer {
     classify: Classify,
     retrieve: Retrieve,
-    rerank_boolean: Rerank<Boolean>,
-    rerank_choice: Rerank<Choice>,
-    rerank_ranking: Rerank<Ranking>,
     rerank_open: Rerank<Open>,
     open: OpenEnded,
 }
 
 impl PipelineAnswerer {
+    /// Classifies every question as `open`; see `with_classifier`.
     pub fn new(retriever: Arc<dyn Retriever>, explain: Arc<dyn ChatModel>) -> Self {
         Self {
-            classify: Classify,
+            classify: Classify::new(None),
             retrieve: Retrieve::new(retriever),
-            rerank_boolean: Rerank::default(),
-            rerank_choice: Rerank::default(),
-            rerank_ranking: Rerank::default(),
             rerank_open: Rerank::default(),
             open: Seq(Explain::new(explain), Verify::new()),
         }
     }
 
-    /// Hybrid retrieval with Bedrock embeddings, and Bedrock for `Explain`.
-    pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> anyhow::Result<Self> {
-        let embedder = Arc::new(BedrockEmbedder::from_args(&args.embed).await?);
-        let retriever = HybridRetriever::new(pool, embedder, HybridConfig::default());
-        let explain = BedrockChat::from_args(&args.chat).await;
-        Ok(Self::new(Arc::new(retriever), Arc::new(explain)))
+    pub fn with_classifier(self, system_one: Arc<dyn SystemOne>) -> Self {
+        Self {
+            classify: Classify::new(Some(system_one)),
+            ..self
+        }
     }
 
-    async fn classify(&self, question: Question) -> Result<Classified, Halted> {
+    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` on System One when configured.
+    pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> anyhow::Result<Self> {
+        let embedder = llm::embedder(&args.embed).await?;
+        let retriever = HybridRetriever::new(pool, embedder, HybridConfig::default());
+        let explain = llm::explain_model(&args.chat).await;
+        let answerer = Self::new(Arc::new(retriever), explain);
+        Ok(match HttpSystemOne::from_args(&args.system_one) {
+            Some(system_one) => answerer.with_classifier(Arc::new(system_one)),
+            None => answerer,
+        })
+    }
+
+    /// Until `Answer` lands (milestone 6), `boolean`, `choice`, and `ranking` questions take the open path; the
+    /// returned category is still the one `Classify` chose.
+    async fn classify(&self, question: Question) -> Result<(CategoryKind, Classified), Halted> {
         let run = Run::new(question)
             .both("classify_retrieve", &self.classify, &self.retrieve)
             .await?;
         let category = run.state().0;
         let run: Run<Unclassified, Candidates> = run.map(|(_, candidates)| candidates);
-        Ok(match category {
-            CategoryKind::Boolean => {
-                Classified::Boolean(run.classified().then(&self.rerank_boolean).await?)
-            }
-            CategoryKind::Choice => {
-                Classified::Choice(run.classified().then(&self.rerank_choice).await?)
-            }
-            CategoryKind::Ranking => {
-                Classified::Ranking(run.classified().then(&self.rerank_ranking).await?)
-            }
-            CategoryKind::Open => Classified::Open(run.classified().then(&self.rerank_open).await?),
-        })
+        let run = run.classified::<Open>().then(&self.rerank_open).await?;
+        Ok((category, Classified::Open(run)))
     }
 }
 
 #[async_trait]
 impl Answerer for PipelineAnswerer {
     async fn answer(&self, question: Question) -> RunReport {
-        let classified = match self.classify(question).await {
+        let (category, classified) = match self.classify(question).await {
             Ok(classified) => classified,
             Err(halted) => return halted_report(halted, &[]),
         };
-        match classified {
+        let mut report = match classified {
             Classified::Boolean(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Choice(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Ranking(run) => halted_report(answer_not_implemented(run), &[]),
@@ -115,7 +116,9 @@ impl Answerer for PipelineAnswerer {
                     Err(halted) => halted_report(halted, &sources),
                 }
             }
-        }
+        };
+        report.category = Some(category);
+        report
     }
 }
 
