@@ -13,6 +13,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[expect(clippy::large_enum_variant, reason = "parsed once at startup")]
 enum Command {
     /// Serve the OpenAI-compatible API.
     Serve(server::Args),
