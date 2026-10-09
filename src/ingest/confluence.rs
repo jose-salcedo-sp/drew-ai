@@ -47,6 +47,9 @@ pub struct Args {
     /// Drew's Atlassian account id; pages he created are authoritative.
     #[arg(long, env = "DREW_CONFLUENCE_ACCOUNT_ID")]
     pub drew_confluence_account_id: Option<String>,
+    /// Optional CQL that narrows the space, e.g. `contributor = "<account id>"`. Unset: every page in the space.
+    #[arg(long, env = "CONFLUENCE_CQL")]
+    pub confluence_cql: Option<String>,
 }
 
 impl fmt::Debug for Args {
@@ -63,6 +66,7 @@ impl fmt::Debug for Args {
                 "drew_confluence_account_id",
                 &self.drew_confluence_account_id,
             )
+            .field("confluence_cql", &self.confluence_cql)
             .finish()
     }
 }
@@ -75,6 +79,7 @@ pub struct Connector {
     email: String,
     api_token: String,
     drew_account_id: String,
+    filter: Option<String>,
 }
 
 impl Connector {
@@ -126,6 +131,7 @@ impl Connector {
             email,
             api_token,
             drew_account_id,
+            filter: value(&args.confluence_cql),
         }))
     }
 
@@ -213,18 +219,30 @@ impl Connector {
         self.get_all(url).await
     }
 
-    /// A superset of the pages changed after `since`; the caller filters on the exact timestamp.
-    async fn pages_modified_around(&self, since: DateTime<Utc>) -> anyhow::Result<Vec<Page>> {
-        // CQL dates have minute precision and are read in the API user's profile timezone,
-        // so the query starts a day early.
-        let from = (since - TimeDelta::days(1)).format("%Y-%m-%d %H:%M");
-        let cql = format!(
-            r#"space = "{}" and type = page and lastmodified >= "{from}" order by lastmodified asc"#,
+    /// Pages of the space matching the optional filter, modified around or after `since` when given; a superset, since
+    /// the caller filters on the exact timestamp.
+    fn search_cql(&self, since: Option<DateTime<Utc>>) -> String {
+        let mut cql = format!(
+            r#"space = "{}" and type = page"#,
             self.space_key.replace('\\', "\\\\").replace('"', "\\\"")
         );
+        if let Some(filter) = &self.filter {
+            cql.push_str(&format!(" and ({filter})"));
+        }
+        if let Some(since) = since {
+            // CQL dates have minute precision and are read in the API user's profile timezone,
+            // so the query starts a day early.
+            let from = (since - TimeDelta::days(1)).format("%Y-%m-%d %H:%M");
+            cql.push_str(&format!(r#" and lastmodified >= "{from}""#));
+        }
+        cql.push_str(" order by lastmodified asc");
+        cql
+    }
+
+    async fn search_pages(&self, cql: &str) -> anyhow::Result<Vec<Page>> {
         let url = self.url(
             "/wiki/rest/api/content/search",
-            &[("cql", &cql), ("limit", &CQL_LIMIT.to_string())],
+            &[("cql", cql), ("limit", &CQL_LIMIT.to_string())],
         )?;
         let hits: Vec<SearchHit> = self.get_all(url).await?;
         let mut seen = HashSet::new();
@@ -346,9 +364,10 @@ impl Source for Connector {
     }
 
     async fn fetch_changed(&self, since: Option<DateTime<Utc>>) -> anyhow::Result<Vec<Document>> {
-        let pages = match since {
-            None => self.all_pages().await?,
-            Some(since) => self.pages_modified_around(since).await?,
+        let pages = if since.is_none() && self.filter.is_none() {
+            self.all_pages().await?
+        } else {
+            self.search_pages(&self.search_cql(since)).await?
         };
         let changed: Vec<Page> = pages
             .into_iter()

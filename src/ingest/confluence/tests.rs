@@ -24,7 +24,25 @@ fn args(base_url: &str) -> Args {
         confluence_email: Some("drew-bot@example.com".to_owned()),
         confluence_api_token: Some("secret-token".to_owned()),
         drew_confluence_account_id: Some(DREW.to_owned()),
+        confluence_cql: None,
     }
+}
+
+#[test]
+fn the_filter_narrows_the_search_and_composes_with_since() {
+    let narrowed = Args {
+        confluence_cql: Some(format!(r#"contributor = "{DREW}""#)),
+        ..args("https://example.atlassian.net")
+    };
+    let connector = Connector::from_args(&narrowed).unwrap().unwrap();
+    assert_eq!(
+        connector.search_cql(None),
+        r#"space = "ARM" and type = page and (contributor = "557058:drew") order by lastmodified asc"#
+    );
+    assert_eq!(
+        connector.search_cql(Some(time("2026-10-09T12:30:00Z"))),
+        r#"space = "ARM" and type = page and (contributor = "557058:drew") and lastmodified >= "2026-10-08 12:30" order by lastmodified asc"#
+    );
 }
 
 fn connector(server: &MockServer) -> Connector {
