@@ -1,0 +1,43 @@
+<p>This page explains how ARM models SAP roles.</p>
+<ac:structured-macro ac:name="toc" ac:schema-version="1" ac:macro-id="0b1c2d3e" />
+<h1>Roles</h1>
+<p>A role bundles authorizations. Users are assigned through the <code>AGR_USERS</code>&nbsp;table.</p>
+<h2>Single roles</h2>
+<ul>
+  <li><p>Hold authorization objects such as <strong>S_TCODE</strong>.</p></li>
+  <li><p>Are assigned directly</p>
+    <ol>
+      <li><p>via PFCG</p></li>
+      <li><p>via SU01</p></li>
+    </ol>
+  </li>
+</ul>
+<h2>Composite roles</h2>
+<p>A composite role contains single roles.</p>
+<ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="7f8e9d0c">
+  <ac:parameter ac:name="language">sql</ac:parameter>
+  <ac:parameter ac:name="title">Role assignments</ac:parameter>
+  <ac:plain-text-body><![CDATA[SELECT agr_name, uname
+  FROM agr_users
+ WHERE agr_name LIKE 'Z%';]]></ac:plain-text-body>
+</ac:structured-macro>
+<h3>Examples</h3>
+<table data-layout="default">
+  <colgroup><col style="width: 200.0px;" /><col style="width: 300.0px;" /></colgroup>
+  <tbody>
+    <tr><th><p><strong>Role</strong></p></th><th><p><strong>Contains</strong></p></th></tr>
+    <tr><td><p>Z_FINANCE</p></td><td><p>Z_AP, Z_AR</p></td></tr>
+    <tr><td><p>Z_EMPTY</p></td><td><p /></td></tr>
+  </tbody>
+</table>
+<h2>Empty section</h2>
+<p />
+<h1>Mappings</h1>
+<p>See <ac:link><ri:page ri:content-title="Q&amp;A" /></ac:link> and <ac:link><ri:page ri:content-title="Ignored" /><ac:plain-text-link-body><![CDATA[the FAQ]]></ac:plain-text-link-body></ac:link> for details.</p>
+<h2>Examples</h2>
+<ac:structured-macro ac:name="info" ac:schema-version="1"><ac:rich-text-body><p>Mapping examples live in Jira.</p></ac:rich-text-body></ac:structured-macro>
+<h2>   </h2>
+<h4>Not a section</h4>
+<p>Minor headings stay in their section.</p>
+<h2>Examples</h2>
+<p>Reviewed on <time datetime="2026-09-30" />.</p>
