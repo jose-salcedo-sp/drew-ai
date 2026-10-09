@@ -1,0 +1,34 @@
+{
+  "ok": true,
+  "messages": [
+    {
+      "type": "message",
+      "user": "U0BOB",
+      "text": "Is SU53 reliable for missing authorizations?",
+      "ts": "1790294400.000500",
+      "thread_ts": "1790294400.000500",
+      "reply_count": 2,
+      "latest_reply": "1790900000.000600"
+    },
+    {
+      "type": "message",
+      "subtype": "bot_message",
+      "bot_id": "B0JIRA",
+      "username": "jira",
+      "text": "Linked <https://jira.example.com/browse/ARM-1|ARM-1>",
+      "ts": "1790899000.000550",
+      "thread_ts": "1790294400.000500",
+      "bot_profile": { "id": "B0JIRA", "name": "Jira Cloud", "deleted": false }
+    },
+    {
+      "type": "message",
+      "user": "U0ALICE",
+      "text": "Mostly. Trace with ST01 when it lies.",
+      "ts": "1790900000.000600",
+      "thread_ts": "1790294400.000500",
+      "parent_user_id": "U0BOB"
+    }
+  ],
+  "has_more": false,
+  "response_metadata": { "next_cursor": "" }
+}
