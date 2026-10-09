@@ -1,6 +1,8 @@
 //! Postgres + pgvector. Schema lives in `migrations/`; queries use runtime-checked `sqlx::query`, not the macros.
 
+pub mod chunks;
 pub mod fakes;
+pub mod runs;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

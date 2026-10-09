@@ -1,5 +1,7 @@
 //! Model clients: Bedrock embeddings, the Bedrock "why" LLM, and System One (OpenAI-compatible HTTP).
 
+pub mod bedrock_chat;
+pub mod bedrock_embed;
 pub mod fakes;
 
 use async_trait::async_trait;

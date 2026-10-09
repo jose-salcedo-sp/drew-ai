@@ -1,6 +1,7 @@
 //! Hybrid retrieval: full-text + vector over current chunk versions, merged with reciprocal rank fusion.
 
 pub mod fakes;
+pub mod hybrid;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
