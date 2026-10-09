@@ -66,12 +66,12 @@ impl Step for Refuse {
         _input: Asked,
     ) -> Result<Scored<(), VerifyRecord>, StepError> {
         Err(
-            StepError::decline(DeclineReason::InvalidModelOutput("not json".into())).with_record(
-                VerifyRecord {
+            StepError::decline(DeclineReason::InvalidModelOutput("not json".into()))
+                .with_record(VerifyRecord {
                     uncited_claims: vec!["raw".into()],
                     unknown_citations: vec![],
-                },
-            ),
+                })
+                .with_model(ModelRef::new("refuser", "1"), "refuse-v1"),
         )
     }
 }
@@ -131,7 +131,7 @@ async fn score_below_threshold_halts_with_the_trace_so_far() {
 }
 
 #[tokio::test]
-async fn declined_step_keeps_its_record() {
+async fn declined_step_keeps_its_record_and_model() {
     let halted = Run::new(Question::new("q"))
         .then(&Refuse)
         .await
@@ -142,6 +142,8 @@ async fn declined_step_keeps_its_record() {
     let entry = &halted.trace.entries()[0];
     assert!(matches!(entry.outcome, StepOutcome::Declined { .. }));
     assert!(matches!(entry.record, Some(TraceRecord::Verify(_))));
+    assert_eq!(entry.model, Some(ModelRef::new("refuser", "1")));
+    assert_eq!(entry.prompt_version.as_deref(), Some("refuse-v1"));
 }
 
 #[tokio::test]
