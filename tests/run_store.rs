@@ -25,7 +25,7 @@ use tower::ServiceExt;
 fn citation() -> Citation {
     Citation {
         chunk: ChunkRef {
-            id: ChunkId("confluence:1#roles".into()),
+            id: ChunkId("markdown:roles.md#roles".into()),
             version: ChunkVersion("v1".into()),
         },
         title: "Roles".into(),
@@ -44,7 +44,7 @@ fn trace() -> Trace {
         "prompt_version": "rerank-v1",
         "outcome": { "status": "declined", "reason": { "kind": "low_confidence" }, "score": 0.25, "threshold": 0.5 },
         "record": { "kind": "rerank", "raw": "[1]", "chunks": [
-            { "chunk": { "id": "confluence:1#roles", "version": "v1" }, "score": 0.25 }
+            { "chunk": { "id": "markdown:roles.md#roles", "version": "v1" }, "score": 0.25 }
         ] }
     }]))
     .unwrap()
@@ -137,6 +137,7 @@ async fn served_runs_are_persisted_in_postgres(pool: PgPool) -> anyhow::Result<(
         }),
         runs: Arc::new(PgRunStore::new(pool)),
         keys: Arc::new("sk-drew:drew".parse().unwrap()),
+        admins: Arc::new(drew::server::auth::AdminUsers::default()),
     };
     let app = router(state);
     let send = |request: Request<Body>| {

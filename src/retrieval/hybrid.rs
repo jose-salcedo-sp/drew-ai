@@ -424,9 +424,14 @@ impl TryFrom<ChunkRow> for Chunk {
 
     fn try_from(row: ChunkRow) -> anyhow::Result<Self> {
         let source = match row.source.as_str() {
-            "confluence" => SourceKind::Confluence,
-            "jira" => SourceKind::Jira,
-            "slack" => SourceKind::Slack,
+            "markdown" => SourceKind::Markdown,
+            "confluence" | "jira" | "slack" => {
+                return Err(anyhow!(
+                    "chunk {} is from legacy source {}; re-ingest the markdown corpus",
+                    row.id,
+                    row.source
+                ));
+            }
             other => return Err(anyhow!("chunk {} has unknown source {other:?}", row.id)),
         };
         let sensitivity = match row.sensitivity.as_str() {

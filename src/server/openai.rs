@@ -3,11 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{CategoryKind, Question, RunId, Score},
+    domain::{CategoryKind, Question, RunId},
     pipeline::{
         DeclineReason,
         report::{Citation, Outcome, RunReport, Verdict},
-        trace::{StepOutcome, Trace},
     },
     store::runs::status,
 };
@@ -76,7 +75,7 @@ impl ChatRequest {
     }
 }
 
-/// Category, scores, outcome, citations, and the full trace of one run.
+/// Category, outcome, and citations for one run. The full trace is on `GET /v1/runs/{id}`.
 #[derive(Debug, Serialize)]
 pub struct Drew {
     pub run_id: RunId,
@@ -90,20 +89,8 @@ pub struct Drew {
     pub decline_reason: Option<DeclineReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Verdict>,
-    pub scores: Vec<StepScore>,
     /// Numbered as in the content: the first is `[1]`. For a decline, the ranked sources.
     pub citations: Vec<Citation>,
-    pub trace: Trace,
-}
-
-#[derive(Debug, Serialize)]
-pub struct StepScore {
-    pub step: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    pub status: &'static str,
-    pub score: Option<Score>,
-    pub threshold: Option<Score>,
 }
 
 impl Drew {
@@ -125,27 +112,6 @@ impl Drew {
             ),
             Outcome::Failed { at, .. } => (Some(at.clone()), None, None, vec![]),
         };
-        let scores = report
-            .trace
-            .entries()
-            .iter()
-            .map(|entry| {
-                let (status, score, threshold) = match &entry.outcome {
-                    StepOutcome::Passed { score, threshold } => ("passed", *score, *threshold),
-                    StepOutcome::Declined {
-                        score, threshold, ..
-                    } => ("declined", *score, *threshold),
-                    StepOutcome::Failed { .. } => ("failed", None, None),
-                };
-                StepScore {
-                    step: entry.step.clone(),
-                    group: entry.group.clone(),
-                    status,
-                    score,
-                    threshold,
-                }
-            })
-            .collect();
         Self {
             run_id: report.id,
             category: report.category,
@@ -153,9 +119,7 @@ impl Drew {
             halted_at,
             decline_reason,
             verdict,
-            scores,
             citations,
-            trace: report.trace.clone(),
         }
     }
 }

@@ -1,6 +1,10 @@
 //! Per-user bearer keys from `DREW_API_KEYS`.
 
-use std::{collections::HashMap, fmt, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    str::FromStr,
+};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 use sha2::{Digest, Sha256};
@@ -27,6 +31,36 @@ fn digest(key: &str) -> [u8; 32] {
 impl fmt::Debug for ApiKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ApiKeys({} keys)", self.0.len())
+    }
+}
+
+/// User ids that may read any run (comma-separated), for auditing Slack and API traffic.
+#[derive(Clone, Default)]
+pub struct AdminUsers(HashSet<UserId>);
+
+impl AdminUsers {
+    pub fn contains(&self, user: &UserId) -> bool {
+        self.0.contains(user)
+    }
+}
+
+impl fmt::Debug for AdminUsers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AdminUsers({} users)", self.0.len())
+    }
+}
+
+impl FromStr for AdminUsers {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        let users: HashSet<UserId> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|id| UserId(id.into()))
+            .collect();
+        Ok(Self(users))
     }
 }
 

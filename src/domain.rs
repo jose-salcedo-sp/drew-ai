@@ -81,22 +81,18 @@ pub struct Score(pub f32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
-    Confluence,
-    Jira,
-    Slack,
+    Markdown,
 }
 
 impl SourceKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Confluence => "confluence",
-            Self::Jira => "jira",
-            Self::Slack => "slack",
+            Self::Markdown => "markdown",
         }
     }
 }
 
-/// A source unit: a Confluence page, a Jira issue, or a Slack thread. Format: `{source}:{external_id}`.
+/// A source unit: one markdown file in the docs corpus. Format: `{source}:{external_id}`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DocumentId(pub String);
@@ -176,7 +172,7 @@ pub struct Labels {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub source: SourceKind,
-    /// Page id, issue key, or `{channel_id}:{thread_ts}`.
+    /// Path relative to the docs root, with `/` separators.
     pub external_id: String,
     pub title: String,
     pub url: String,
@@ -329,10 +325,10 @@ mod tests {
     #[test]
     fn chunk_version_changes_with_embedding_model() {
         let document = Document {
-            source: SourceKind::Confluence,
-            external_id: "123".into(),
+            source: SourceKind::Markdown,
+            external_id: "roles.md".into(),
             title: "Roles".into(),
-            url: "https://example.test/123".into(),
+            url: "https://example.test/roles.md".into(),
             updated_at: Utc::now(),
             labels: Labels {
                 acl: vec![],
@@ -354,6 +350,6 @@ mod tests {
             ChunkVersion::compute(&document, &draft, &titan),
             ChunkVersion::compute(&document, &draft, &cohere),
         );
-        assert_eq!(document.chunk_id(&draft).0, "confluence:123#intro");
+        assert_eq!(document.chunk_id(&draft).0, "markdown:roles.md#intro");
     }
 }

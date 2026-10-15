@@ -44,15 +44,15 @@ pub(crate) mod fixtures {
     };
 
     pub fn chunk(locator: &str, title: &str, text: &str) -> Chunk {
-        let document_id = DocumentId::new(SourceKind::Confluence, title);
+        let document_id = DocumentId::new(SourceKind::Markdown, title);
         Chunk {
             id: ChunkId::new(&document_id, locator),
             version: ChunkVersion(format!("v-{locator}")),
             document_id,
-            source: SourceKind::Confluence,
+            source: SourceKind::Markdown,
             title: title.into(),
             heading: Some(locator.into()),
-            url: format!("https://confluence.example.test/{title}#{locator}"),
+            url: format!("https://example.test/docs/{title}#{locator}"),
             text: text.into(),
             authoritative: false,
             labels: Labels {

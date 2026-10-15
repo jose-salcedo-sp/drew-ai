@@ -10,7 +10,7 @@ use crate::{
 };
 
 pub fn chunk_id(n: usize) -> ChunkId {
-    ChunkId(format!("confluence:1#s{n}"))
+    ChunkId(format!("markdown:doc.md#s{n}"))
 }
 
 pub fn citation(n: usize) -> Citation {
@@ -93,7 +93,7 @@ pub fn trace() -> Trace {
             "prompt_version": null,
             "outcome": { "status": "passed", "score": null, "threshold": null },
             "record": { "kind": "retrieve", "chunks": [
-                { "chunk": { "id": "confluence:1#s1", "version": "v1" }, "score": 0.03125 }
+                { "chunk": { "id": "markdown:doc.md#s1", "version": "v1" }, "score": 0.03125 }
             ] }
         },
         {
@@ -105,7 +105,7 @@ pub fn trace() -> Trace {
             "prompt_version": "rerank-v1",
             "outcome": { "status": "passed", "score": 0.75, "threshold": 0.5 },
             "record": { "kind": "rerank", "raw": "[1]", "chunks": [
-                { "chunk": { "id": "confluence:1#s1", "version": "v1" }, "score": 0.75 }
+                { "chunk": { "id": "markdown:doc.md#s1", "version": "v1" }, "score": 0.75 }
             ] }
         }
     ]))

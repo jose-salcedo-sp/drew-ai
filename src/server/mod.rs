@@ -36,7 +36,7 @@ use crate::{
 };
 
 use self::{
-    auth::{ApiKeys, User},
+    auth::{AdminUsers, ApiKeys, User},
     error::ApiError,
     openai::{ChatRequest, Chunk, Completion, Drew, ModelList},
 };
@@ -50,8 +50,13 @@ pub struct Args {
     /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
     #[arg(long, env = "DREW_API_KEYS", hide_env_values = true)]
     pub api_keys: ApiKeys,
+    /// User ids that may read any persisted run, comma-separated.
+    #[arg(long, env = "DREW_ADMIN_USERS", default_value = "")]
+    pub admin_users: AdminUsers,
     #[command(flatten)]
     pub pipeline: PipelineArgs,
+    #[command(flatten)]
+    pub slack: crate::slack::SlackArgs,
 }
 
 #[derive(Clone)]
@@ -59,6 +64,7 @@ pub struct AppState {
     pub answerer: Arc<dyn Answerer>,
     pub runs: Arc<dyn RunStore>,
     pub keys: Arc<ApiKeys>,
+    pub admins: Arc<AdminUsers>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -75,9 +81,19 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
     let state = AppState {
         answerer: Arc::new(answerer),
-        runs: Arc::new(PgRunStore::new(pool)),
+        runs: Arc::new(PgRunStore::new(pool.clone())),
         keys: Arc::new(args.api_keys),
+        admins: Arc::new(args.admin_users),
     };
+    if let Some(bot) = crate::slack::Bot::from_args(&args.slack)? {
+        let shutdown = shutdown_handle();
+        let bot_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = bot.run(bot_state, shutdown).await {
+                tracing::error!(error = format!("{error:#}"), "slack bot stopped");
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("binding {}", args.bind))?;
@@ -86,6 +102,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn shutdown_handle() -> tokio::sync::watch::Receiver<bool> {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = tx.send(true);
+    });
+    rx
 }
 
 /// As PID 1 in a container the process gets no default SIGTERM handler, so it has to exit on SIGTERM itself.
@@ -201,8 +226,7 @@ async fn get_run(
         ApiError::internal("run_store_unavailable", "The run could not be loaded.")
     })?;
     match run {
-        // Someone else's run is indistinguishable from a missing one.
-        Some(run) if run.user == user => Ok(Json(run.into())),
+        Some(run) if run.user == user || state.admins.contains(&user) => Ok(Json(run.into())),
         _ => Err(not_found()),
     }
 }

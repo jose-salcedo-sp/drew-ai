@@ -35,7 +35,7 @@ fn position(results: &[Retrieved], id: &ChunkId) -> Option<usize> {
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
     let chunk = async |key: &str, text: &str| {
-        let doc = document(&pool, SourceKind::Jira, key, key).await;
+        let doc = document(&pool, SourceKind::Markdown, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
     let s_tcode = chunk(
@@ -84,12 +84,12 @@ async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
-    let page = document(&pool, SourceKind::Confluence, "10", "Tables").await;
+    let page = document(&pool, SourceKind::Markdown, "10", "Tables").await;
     let heading = SeedChunk::new(&page, "agr-1251", 0, "Authorization values per role.")
         .heading("AGR_1251")
         .insert(&pool)
         .await;
-    let slack = document(&pool, SourceKind::Slack, "C1:1.0", "thread").await;
+    let slack = document(&pool, SourceKind::Markdown, "C1:1.0", "thread").await;
     let italic = SeedChunk::new(&slack, "1.0", 0, "check _USOBT_C_ first")
         .insert(&pool)
         .await;
@@ -104,7 +104,7 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn prose_query_hits_via_vectors(pool: PgPool) {
     let question = "how do I take away someone's access when they quit";
-    let doc = document(&pool, SourceKind::Jira, "ARM-7", "Leavers").await;
+    let doc = document(&pool, SourceKind::Markdown, "ARM-7", "Leavers").await;
     // Stands in for a semantic embedding: the chunk shares no stem with the question, only meaning.
     let leavers = SeedChunk::new(
         &doc,
@@ -119,7 +119,7 @@ async fn prose_query_hits_via_vectors(pool: PgPool) {
         ("ARM-8", "Transport roles between clients with SCC1."),
         ("ARM-9", "Payroll cluster tables are read with macros."),
     ] {
-        let doc = document(&pool, SourceKind::Jira, key, key).await;
+        let doc = document(&pool, SourceKind::Markdown, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await;
     }
 
@@ -141,7 +141,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     let query = "S_TCODE authorization check";
     let q = embed(query).await;
     let chunk = async |key: &str, text: &str, cosine: f32| {
-        let doc = document(&pool, SourceKind::Jira, key, key).await;
+        let doc = document(&pool, SourceKind::Markdown, key, key).await;
         SeedChunk::new(&doc, "body", 0, text)
             .embedding(similar_to(&q, cosine))
             .insert(&pool)
@@ -183,7 +183,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn superseded_versions_are_never_returned(pool: PgPool) {
-    let page = document(&pool, SourceKind::Confluence, "20", "Start authorization").await;
+    let page = document(&pool, SourceKind::Markdown, "20", "Start authorization").await;
     SeedChunk::new(&page, "intro", 0, "Intro, old wording.")
         .version("old-intro")
         .superseded()
@@ -211,7 +211,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
     .version("new-check")
     .insert(&pool)
     .await;
-    let gone = document(&pool, SourceKind::Jira, "ARM-10", "Deleted issue").await;
+    let gone = document(&pool, SourceKind::Markdown, "ARM-10", "Deleted issue").await;
     let deleted = SeedChunk::new(&gone, "body", 0, "S_TCODE in a deleted issue.")
         .superseded()
         .insert(&pool)
@@ -232,7 +232,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn confluence_hits_expand_to_neighbouring_sections(pool: PgPool) {
-    let page = document(&pool, SourceKind::Confluence, "30", "SU24 guide").await;
+    let page = document(&pool, SourceKind::Markdown, "30", "SU24 guide").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
         "Overview of proposal values.",
@@ -250,7 +250,7 @@ async fn confluence_hits_expand_to_neighbouring_sections(pool: PgPool) {
             .await;
         sections.push(section);
     }
-    let sparse = document(&pool, SourceKind::Confluence, "31", "Sparse").await;
+    let sparse = document(&pool, SourceKind::Markdown, "31", "Sparse").await;
     let first = SeedChunk::new(&sparse, "a", 0, "Background.")
         .insert(&pool)
         .await;
@@ -284,7 +284,7 @@ async fn confluence_hits_expand_to_neighbouring_sections(pool: PgPool) {
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
-    let page = document(&pool, SourceKind::Confluence, "40", "Start checks").await;
+    let page = document(&pool, SourceKind::Markdown, "40", "Start checks").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
         "Overview of the start check.",
@@ -327,14 +327,20 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgPool) {
-    let issue = document(&pool, SourceKind::Jira, "ARM-11", "ARM-11: import fails").await;
+    let issue = document(
+        &pool,
+        SourceKind::Markdown,
+        "ARM-11",
+        "ARM-11: import fails",
+    )
+    .await;
     let summary = SeedChunk::new(&issue, "issue-1", 0, "Import fails on the role upload.")
         .insert(&pool)
         .await;
     let answer = SeedChunk::new(&issue, "issue-2", 1, "Drew: SU24 data was missing.")
         .insert(&pool)
         .await;
-    let thread = document(&pool, SourceKind::Slack, "C1:2.0", "thread").await;
+    let thread = document(&pool, SourceKind::Markdown, "C1:2.0", "thread").await;
     let question = SeedChunk::new(&thread, "thread", 0, "Is SU24 transported? Yes.")
         .insert(&pool)
         .await;
@@ -364,7 +370,7 @@ async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgP
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn chunks_are_fully_populated(pool: PgPool) {
-    let page = document(&pool, SourceKind::Confluence, "50", "Role design").await;
+    let page = document(&pool, SourceKind::Markdown, "50", "Role design").await;
     let id = SeedChunk::new(
         &page,
         "naming",
@@ -384,10 +390,10 @@ async fn chunks_are_fully_populated(pool: PgPool) {
     assert_eq!(chunk.id, id);
     assert_eq!(chunk.version.0, "v1");
     assert_eq!(chunk.document_id, page);
-    assert_eq!(chunk.source, SourceKind::Confluence);
+    assert_eq!(chunk.source, SourceKind::Markdown);
     assert_eq!(chunk.title, "Role design");
     assert_eq!(chunk.heading.as_deref(), Some("Naming"));
-    assert_eq!(chunk.url, "https://example.test/confluence:50#naming");
+    assert_eq!(chunk.url, "https://example.test/markdown:50#naming");
     assert_eq!(chunk.labels.acl, ["group:arm"]);
     assert!(!chunk.authoritative);
 }
@@ -395,7 +401,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn mismatched_embedding_model_is_refused(pool: PgPool) {
     let titan = ModelRef::new("amazon.titan-embed-text-v2", "2");
-    let doc = document(&pool, SourceKind::Jira, "ARM-12", "Roles").await;
+    let doc = document(&pool, SourceKind::Markdown, "ARM-12", "Roles").await;
     SeedChunk::new(&doc, "old", 0, "AGR_USERS old vectors.")
         .model(titan.clone())
         .superseded()
@@ -427,7 +433,7 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
 async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
     let retriever = retriever(&pool, HybridConfig::default());
     assert!(retriever.retrieve("AGR_USERS").await.unwrap().is_empty());
-    let doc = document(&pool, SourceKind::Jira, "ARM-13", "Roles").await;
+    let doc = document(&pool, SourceKind::Markdown, "ARM-13", "Roles").await;
     SeedChunk::new(&doc, "body", 0, "AGR_USERS")
         .insert(&pool)
         .await;
@@ -437,7 +443,7 @@ async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn vector_side_uses_hnsw_beyond_its_default_ef_search(pool: PgPool) {
     for i in 0..60 {
-        let doc = document(&pool, SourceKind::Jira, &format!("V-{i}"), "filler").await;
+        let doc = document(&pool, SourceKind::Markdown, &format!("V-{i}"), "filler").await;
         SeedChunk::new(&doc, "body", 0, &format!("note {i} on payroll"))
             .insert(&pool)
             .await;
@@ -478,31 +484,31 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
     let start = chunk(
-        SourceKind::Confluence,
+        SourceKind::Markdown,
         "60",
         "The kernel checks S_TCODE before any transaction starts.",
     )
     .await;
     let assignments = chunk(
-        SourceKind::Confluence,
+        SourceKind::Markdown,
         "61",
         "AGR_USERS lists which users hold which roles, with validity dates.",
     )
     .await;
     let proposals = chunk(
-        SourceKind::Jira,
+        SourceKind::Markdown,
         "ARM-20",
         "SU24 proposal values feed PFCG when roles are built.",
     )
     .await;
     let tables = chunk(
-        SourceKind::Slack,
+        SourceKind::Markdown,
         "C2:1.0",
         "S_TABU_DIS protects table maintenance by authorization group.",
     )
     .await;
     let leavers = chunk(
-        SourceKind::Slack,
+        SourceKind::Markdown,
         "C2:2.0",
         "Leavers are locked first, then their roles are removed.",
     )
@@ -511,7 +517,7 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
         .into_iter()
         .enumerate()
     {
-        chunk(SourceKind::Jira, &format!("ARM-3{i}"), text).await;
+        chunk(SourceKind::Markdown, &format!("ARM-3{i}"), text).await;
     }
     let golden: [(&str, &[&ChunkId]); 5] = [
         ("Is S_TCODE checked at transaction start?", &[&start]),

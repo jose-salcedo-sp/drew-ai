@@ -31,3 +31,9 @@ impl RunStore for MemoryRunStore {
         Ok(self.runs.lock().unwrap().get(&id).cloned())
     }
 }
+
+impl MemoryRunStore {
+    pub fn stored(&self) -> Vec<StoredRun> {
+        self.runs.lock().unwrap().values().cloned().collect()
+    }
+}

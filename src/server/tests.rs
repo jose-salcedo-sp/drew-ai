@@ -16,7 +16,7 @@ use crate::{
     store::{RunStore, StoredRun, fakes::MemoryRunStore},
 };
 
-use super::{AppState, fixtures, render, router};
+use super::{AppState, auth::AdminUsers, fixtures, render, router};
 
 const DREW_KEY: &str = "sk-drew";
 const JOSE_KEY: &str = "sk-jose";
@@ -32,6 +32,7 @@ fn app(answerer: impl Answerer + 'static) -> App {
         answerer: Arc::new(answerer),
         runs: runs.clone(),
         keys: Arc::new(format!("{DREW_KEY}:drew,{JOSE_KEY}:jose").parse().unwrap()),
+        admins: Arc::new(AdminUsers::default()),
     };
     App {
         router: router(state),
@@ -269,18 +270,8 @@ async fn answered_run_returns_a_completion_with_the_drew_object() {
         drew["citations"],
         serde_json::to_value(&answer.citations).unwrap()
     );
-    assert_eq!(
-        drew["scores"],
-        json!([
-            { "step": "classify", "group": "classify_retrieve", "status": "passed", "score": 0.875, "threshold": 0.5 },
-            { "step": "retrieve", "group": "classify_retrieve", "status": "passed", "score": null, "threshold": null },
-            { "step": "rerank", "status": "passed", "score": 0.75, "threshold": 0.5 }
-        ])
-    );
-    assert_eq!(
-        drew["trace"],
-        serde_json::to_value(fixtures::trace()).unwrap()
-    );
+    assert!(drew.get("scores").is_none());
+    assert!(drew.get("trace").is_none());
 }
 
 #[tokio::test]
@@ -354,6 +345,7 @@ async fn persistence_failure_returns_500_with_the_run_id() {
             answerer: Arc::new(canned(None, outcome)),
             runs: Arc::new(FailingStore),
             keys: Arc::new(format!("{DREW_KEY}:drew").parse().unwrap()),
+            admins: Arc::new(AdminUsers::default()),
         };
         let reply = send(&router(state), chat(Some(DREW_KEY), ask("Is it?"))).await;
         assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);

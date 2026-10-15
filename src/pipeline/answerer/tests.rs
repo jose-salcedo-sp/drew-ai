@@ -152,7 +152,7 @@ async fn uncited_claim_declines_with_the_reranked_sources() {
 
 #[tokio::test]
 async fn citation_outside_the_reranked_sources_declines() {
-    let forged = ChunkId("confluence:Secrets#passwords".into());
+    let forged = ChunkId("markdown:secrets.md#passwords".into());
     let chat = Arc::new(ScriptedChat::replying([reply(json!([
         { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr_users().id, forged] },
     ]))]));

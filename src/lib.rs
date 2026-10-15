@@ -5,4 +5,5 @@ pub mod llm;
 pub mod pipeline;
 pub mod retrieval;
 pub mod server;
+pub mod slack;
 pub mod store;

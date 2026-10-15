@@ -1,14 +1,13 @@
-//! Writes documents and chunk versions: insert new versions, supersede replaced and removed ones, track ingest cursors.
+//! Writes documents and chunk versions: insert new versions, supersede replaced and removed ones.
 
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, bail, ensure};
-use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use sqlx::PgPool;
 
 use crate::{
-    domain::{ChunkDraft, ChunkVersion, Document, Sensitivity, SourceKind},
+    domain::{ChunkDraft, ChunkVersion, Document, DocumentId, Sensitivity, SourceKind},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef},
 };
 
@@ -252,25 +251,25 @@ impl ChunkStore {
         .rows_affected())
     }
 
-    pub async fn cursor(&self, source: SourceKind) -> anyhow::Result<Option<DateTime<Utc>>> {
-        Ok(
-            sqlx::query_scalar("SELECT last_run_at FROM ingest_cursors WHERE source = $1")
-                .bind(source.as_str())
-                .fetch_optional(&self.pool)
-                .await?,
-        )
-    }
-
-    pub async fn set_cursor(&self, source: SourceKind, at: DateTime<Utc>) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO ingest_cursors (source, last_run_at) VALUES ($1, $2)
-             ON CONFLICT (source) DO UPDATE SET last_run_at = EXCLUDED.last_run_at",
+    /// Supersedes current chunks of documents for `source` whose ids are not in `present`.
+    pub async fn supersede_missing_documents(
+        &self,
+        source: SourceKind,
+        present: &[DocumentId],
+    ) -> anyhow::Result<u64> {
+        let ids: Vec<&str> = present.iter().map(|d| d.0.as_str()).collect();
+        Ok(sqlx::query(
+            "UPDATE chunks SET superseded_at = now()
+             WHERE superseded_at IS NULL
+               AND document_id IN (
+                 SELECT id FROM documents WHERE source = $1 AND NOT (id = ANY($2))
+               )",
         )
         .bind(source.as_str())
-        .bind(at)
+        .bind(&ids)
         .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await?
+        .rows_affected())
     }
 }
 

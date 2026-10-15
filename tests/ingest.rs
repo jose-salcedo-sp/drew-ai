@@ -50,15 +50,15 @@ impl Embedder for RecordingEmbedder {
     }
 }
 
-struct FailingSource(SourceKind);
+struct FailingSource;
 
 #[async_trait]
 impl Source for FailingSource {
     fn kind(&self) -> SourceKind {
-        self.0
+        SourceKind::Markdown
     }
 
-    async fn fetch_changed(&self, _since: Option<DateTime<Utc>>) -> anyhow::Result<Vec<Document>> {
+    async fn fetch_all(&self) -> anyhow::Result<Vec<Document>> {
         anyhow::bail!("source is down")
     }
 }
@@ -86,14 +86,14 @@ fn document(source: SourceKind, external_id: &str, chunks: &[(&str, &str)]) -> D
                 heading: Some(locator.to_uppercase()),
                 url: format!("https://example.test/{external_id}#{locator}"),
                 text: (*text).into(),
-                authoritative: false,
+                authoritative: true,
             })
             .collect(),
     }
 }
 
 fn page(chunks: &[(&str, &str)]) -> Document {
-    document(SourceKind::Confluence, "1", chunks)
+    document(SourceKind::Markdown, "roles.md", chunks)
 }
 
 fn static_source(documents: Vec<Document>) -> Box<dyn Source> {
@@ -143,19 +143,20 @@ async fn first_ingest_inserts_every_chunk(pool: PgPool) {
     assert_eq!(
         current(&pool).await,
         [
-            ("confluence:1#a".into(), 0, "fake-hash-embedder".into()),
-            ("confluence:1#b".into(), 1, "fake-hash-embedder".into()),
+            ("markdown:roles.md#a".into(), 0, "fake-hash-embedder".into()),
+            ("markdown:roles.md#b".into(), 1, "fake-hash-embedder".into()),
         ]
     );
     assert_eq!(
         embedder.batches(),
-        [["Doc 1\nA\n\nalpha", "Doc 1\nB\n\nbeta"]]
+        [["Doc roles.md\nA\n\nalpha", "Doc roles.md\nB\n\nbeta"]]
     );
-    let title: String = sqlx::query_scalar("SELECT title FROM documents WHERE id = 'confluence:1'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(title, "Doc 1");
+    let title: String =
+        sqlx::query_scalar("SELECT title FROM documents WHERE id = 'markdown:roles.md'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(title, "Doc roles.md");
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
@@ -185,7 +186,7 @@ async fn changed_chunk_supersedes_its_old_version(pool: PgPool) {
         .unwrap();
 
     assert_eq!(result, stored(1, 1));
-    assert_eq!(embedder.batches()[1], ["Doc 1\nB\n\nbeta, revised"]);
+    assert_eq!(embedder.batches()[1], ["Doc roles.md\nB\n\nbeta, revised"]);
     assert_eq!(count(&pool, "true").await, 3);
     assert_eq!(
         count(&pool, "superseded_at IS NOT NULL AND text = 'beta'").await,
@@ -214,7 +215,7 @@ async fn removed_chunk_is_superseded(pool: PgPool) {
     assert_eq!(result, stored(0, 1));
     assert_eq!(
         current(&pool).await,
-        [("confluence:1#b".into(), 0, "fake-hash-embedder".into())]
+        [("markdown:roles.md#b".into(), 0, "fake-hash-embedder".into())]
     );
     assert_eq!(embedder.batches().len(), 1);
 }
@@ -265,8 +266,8 @@ async fn reordered_chunks_keep_their_versions_and_take_new_ordinals(pool: PgPool
     assert_eq!(
         current(&pool).await,
         [
-            ("confluence:1#a".into(), 1, "fake-hash-embedder".into()),
-            ("confluence:1#b".into(), 0, "fake-hash-embedder".into()),
+            ("markdown:roles.md#a".into(), 1, "fake-hash-embedder".into()),
+            ("markdown:roles.md#b".into(), 0, "fake-hash-embedder".into()),
         ]
     );
 }
@@ -297,25 +298,24 @@ async fn embedding_model_mismatch_is_refused(pool: PgPool) {
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
-    let confluence = static_source(vec![page(&[("a", "alpha"), ("b", "beta")])]);
-    let jira = static_source(vec![document(SourceKind::Jira, "ARM-1", &[("c", "gamma")])]);
-    ingest(&pool, &HashEmbedder, &[confluence, jira], false)
-        .await
-        .unwrap();
+    let first = static_source(vec![
+        page(&[("a", "alpha"), ("b", "beta")]),
+        document(SourceKind::Markdown, "other.md", &[("c", "gamma")]),
+    ]);
+    ingest(&pool, &HashEmbedder, &[first], false).await.unwrap();
 
-    // Jira is not part of this run, so its chunks cannot be re-embedded and must not stay current.
-    let confluence = static_source(vec![page(&[("a", "alpha"), ("b", "beta")])]);
+    let subset = static_source(vec![page(&[("a", "alpha"), ("b", "beta")])]);
     let titan = RecordingEmbedder::named(ModelRef::new("titan", "1"));
-    let reports = ingest(&pool, &titan, &[confluence], true).await.unwrap();
+    let reports = ingest(&pool, &titan, &[subset], true).await.unwrap();
 
     assert!(reports[0].error.is_none());
     assert_eq!(reports[0].documents, 1);
-    assert_eq!(reports[0].stored, stored(2, 2));
+    assert_eq!(reports[0].stored, stored(2, 3));
     assert_eq!(
         current(&pool).await,
         [
-            ("confluence:1#a".into(), 0, "titan".into()),
-            ("confluence:1#b".into(), 1, "titan".into()),
+            ("markdown:roles.md#a".into(), 0, "titan".into()),
+            ("markdown:roles.md#b".into(), 1, "titan".into()),
         ]
     );
     assert_eq!(
@@ -328,50 +328,43 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn cursor_advances_only_when_the_source_succeeds(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let before = Utc::now() - chrono::Duration::milliseconds(1);
-    let sources = [
-        static_source(vec![page(&[("a", "alpha")])]),
-        Box::new(FailingSource(SourceKind::Jira)) as Box<dyn Source>,
-    ];
-
+async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
+    let sources = [static_source(vec![
+        page(&[("a", "alpha")]),
+        document(SourceKind::Markdown, "removed.md", &[("intro", "gone")]),
+    ])];
     ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    assert_eq!(count(&pool, "superseded_at IS NULL").await, 2);
 
-    let cursor = store.cursor(SourceKind::Confluence).await.unwrap().unwrap();
-    assert!(before <= cursor && cursor <= Utc::now());
-    assert_eq!(store.cursor(SourceKind::Jira).await.unwrap(), None);
-
-    // The next run fetches only units updated after the cursor, so this older edit is not seen.
-    let stale_edit = [static_source(vec![page(&[("a", "edited")])])];
-    let reports = ingest(&pool, &HashEmbedder, &stale_edit, false)
-        .await
-        .unwrap();
-    assert_eq!(reports[0].documents, 0);
-
-    let mut fresh = page(&[("a", "edited")]);
-    fresh.updated_at = Utc::now() + chrono::Duration::days(1);
-    let reports = ingest(&pool, &HashEmbedder, &[static_source(vec![fresh])], false)
-        .await
-        .unwrap();
-    assert_eq!(reports[0].stored, stored(1, 1));
+    let sources = [static_source(vec![page(&[("a", "alpha")])])];
+    let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    assert_eq!(reports[0].stored.superseded, 1);
+    assert_eq!(count(&pool, "superseded_at IS NULL").await, 1);
+    assert_eq!(
+        count(
+            &pool,
+            "superseded_at IS NULL AND id LIKE 'markdown:removed.md%'"
+        )
+        .await,
+        0
+    );
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
     let sources = [
-        Box::new(FailingSource(SourceKind::Confluence)) as Box<dyn Source>,
+        Box::new(FailingSource) as Box<dyn Source>,
         static_source(vec![
-            document(SourceKind::Slack, "C1:1.0", &[("1.0", "question")]),
-            document(SourceKind::Slack, "C1:2.0", &[("2.0", "answer")]),
+            document(SourceKind::Markdown, "a.md", &[("intro", "question")]),
+            document(SourceKind::Markdown, "b.md", &[("intro", "answer")]),
         ]),
     ];
 
     let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
 
-    assert_eq!(reports[0].source, SourceKind::Confluence);
+    assert_eq!(reports[0].source, SourceKind::Markdown);
     assert!(format!("{:#}", reports[0].error.as_ref().unwrap()).contains("source is down"));
-    assert_eq!(reports[1].source, SourceKind::Slack);
+    assert_eq!(reports[1].source, SourceKind::Markdown);
     assert!(reports[1].error.is_none());
     assert_eq!(reports[1].documents, 2);
     assert_eq!(reports[1].stored, stored(2, 0));

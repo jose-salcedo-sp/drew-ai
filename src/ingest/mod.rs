@@ -1,11 +1,8 @@
-//! Batch ingestion: connectors fetch changed source units; the runner versions, embeds, and stores their chunks.
+//! Batch ingestion: the markdown source returns a full snapshot; the runner versions, embeds, and stores chunks.
 
-pub mod confluence;
-pub mod jira;
-pub mod slack;
+pub mod markdown;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::{
@@ -21,8 +18,8 @@ use crate::{
 pub trait Source: Send + Sync {
     fn kind(&self) -> SourceKind;
 
-    /// Every source unit updated after `since`, or all of them when `since` is `None`.
-    async fn fetch_changed(&self, since: Option<DateTime<Utc>>) -> anyhow::Result<Vec<Document>>;
+    /// Every document in the source's current snapshot.
+    async fn fetch_all(&self) -> anyhow::Result<Vec<Document>>;
 }
 
 #[derive(Debug, clap::Args)]
@@ -35,11 +32,7 @@ pub struct Args {
     #[arg(long)]
     pub reembed: bool,
     #[command(flatten)]
-    pub confluence: confluence::Args,
-    #[command(flatten)]
-    pub jira: jira::Args,
-    #[command(flatten)]
-    pub slack: slack::Args,
+    pub markdown: markdown::MarkdownArgs,
 }
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
@@ -47,16 +40,13 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let embedder = llm::embedder(&args.embed).await?;
 
     let mut sources: Vec<Box<dyn Source>> = Vec::new();
-    if let Some(connector) = confluence::Connector::from_args(&args.confluence)? {
+    if let Some(connector) = markdown::Connector::from_args(&args.markdown)? {
         sources.push(Box::new(connector));
     }
-    if let Some(connector) = jira::Connector::from_args(&args.jira)? {
-        sources.push(Box::new(connector));
-    }
-    if let Some(connector) = slack::Connector::from_args(&args.slack)? {
-        sources.push(Box::new(connector));
-    }
-    anyhow::ensure!(!sources.is_empty(), "no sources are configured");
+    anyhow::ensure!(
+        !sources.is_empty(),
+        "no sources are configured (set DREW_DOCS_DIR)"
+    );
 
     let reports = ingest(&pool, embedder.as_ref(), &sources, args.reembed).await?;
     let failed: Vec<&str> = reports
@@ -87,11 +77,11 @@ pub struct SourceReport {
     pub source: SourceKind,
     pub documents: u64,
     pub stored: Stored,
-    /// Set when the source failed; its cursor did not advance. Counts cover what was stored before the failure.
+    /// Set when the source failed; counts cover what was stored before the failure.
     pub error: Option<anyhow::Error>,
 }
 
-/// Ingests every source independently: a failing source neither stops the others nor advances its cursor.
+/// Ingests every source independently: a failing source does not stop the others.
 /// Fails before touching any source with `EmbeddingModelMismatch` when current chunks use another model and `reembed` is off.
 pub async fn ingest(
     pool: &PgPool,
@@ -99,7 +89,6 @@ pub async fn ingest(
     sources: &[Box<dyn Source>],
     reembed: bool,
 ) -> anyhow::Result<Vec<SourceReport>> {
-    let started_at = Utc::now();
     let store = ChunkStore::new(pool.clone());
     let model = embedder.model();
 
@@ -121,11 +110,7 @@ pub async fn ingest(
             stored: Stored::default(),
             error: None,
         };
-        let mut result =
-            ingest_source(&store, embedder, source.as_ref(), reembed, &mut report).await;
-        if result.is_ok() {
-            result = store.set_cursor(kind, started_at).await;
-        }
+        let result = ingest_source(&store, embedder, source.as_ref(), &mut report).await;
         match result {
             Ok(()) => tracing::info!(
                 source = kind.as_str(),
@@ -165,16 +150,11 @@ async fn ingest_source(
     store: &ChunkStore,
     embedder: &dyn Embedder,
     source: &dyn Source,
-    reembed: bool,
     report: &mut SourceReport,
 ) -> anyhow::Result<()> {
     let kind = source.kind();
-    let since = if reembed {
-        None
-    } else {
-        store.cursor(kind).await?
-    };
-    let documents = source.fetch_changed(since).await?;
+    let documents = source.fetch_all().await?;
+    let mut seen = Vec::with_capacity(documents.len());
     for document in &documents {
         anyhow::ensure!(
             document.source == kind,
@@ -184,18 +164,19 @@ async fn ingest_source(
         );
         report.stored += store.store(document, embedder).await?;
         report.documents += 1;
+        seen.push(document.id());
     }
+    report.stored.superseded += store.supersede_missing_documents(kind, &seen).await?;
     Ok(())
 }
 
 pub mod fakes {
     use async_trait::async_trait;
-    use chrono::{DateTime, Utc};
 
     use super::Source;
     use crate::domain::{Document, SourceKind};
 
-    /// Returns its documents whose `updated_at` is after `since`.
+    /// Returns all of its documents on every fetch.
     pub struct StaticSource {
         pub kind: SourceKind,
         pub documents: Vec<Document>,
@@ -207,16 +188,8 @@ pub mod fakes {
             self.kind
         }
 
-        async fn fetch_changed(
-            &self,
-            since: Option<DateTime<Utc>>,
-        ) -> anyhow::Result<Vec<Document>> {
-            Ok(self
-                .documents
-                .iter()
-                .filter(|d| since.is_none_or(|since| d.updated_at > since))
-                .cloned()
-                .collect())
+        async fn fetch_all(&self) -> anyhow::Result<Vec<Document>> {
+            Ok(self.documents.clone())
         }
     }
 }

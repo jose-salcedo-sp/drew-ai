@@ -1,6 +1,6 @@
 # Drew AI (Drew as a Service) — v1 Design
 
-Drew AI answers questions about SAP and ARM internals using Drew Steinfatt's documentation and messages as the knowledge source. A small, fast "System One" model answers the **what** (yes/no, a choice, or a ranking); an LLM answers the **why**. Every answer carries provenance.
+Drew AI answers questions about SAP and ARM internals using Drew Steinfatt's pre-audited markdown documentation as the knowledge source. A small, fast "System One" model answers the **what** (yes/no, a choice, or a ranking); an LLM answers the **why**. Every answer carries provenance. v1 is a developer-facing Slack bot plus an OpenAI-compatible HTTP API.
 
 Status: design agreed; crate foundation in place (shared types, pipeline machinery, schema, module boundaries with fakes). Confidence thresholds are intentionally undecided; they are set by the evaluation harness.
 
@@ -8,9 +8,9 @@ Status: design agreed; crate foundation in place (shared types, pipeline machine
 
 | In v1 | Deferred |
 |---|---|
-| Pipeline only, demo for 4 internal users (Drew is one, as reviewer) | Customer access |
-| OpenAI-compatible HTTP API | Slack bot, Gaia UI |
-| Batch ingestion | Event-driven ingestion, revocation SLAs |
+| Developer-facing Slack bot (Socket Mode) and OpenAI-compatible HTTP API | Customer access, Gaia UI |
+| Batch ingestion of a Drew-audited markdown directory | Event-driven ingestion, revocation SLAs |
+| Demo for internal developers (Drew reviews corpus and declines) | Broader rollout before launch gate |
 | Permission/sensitivity labels **recorded** on every chunk | RBAC/RLS **enforcement** |
 | Dockerfile + env config | EKS / Aurora / GitOps deployment |
 
@@ -23,18 +23,14 @@ Guiding constraints:
 
 ## 2. Corpus and ingestion
 
-Sources (Drew-curated subset for the demo):
+Sources:
 
-- ARM Confluence space — chunked by heading section, linked to parent page.
-- Jira — issue + Drew's comments as one unit.
-- 2–3 Slack public channels named by Drew — one thread is one unit. Q&A threads are the primary unit; Drew's messages are flagged authoritative.
-
-Excluded: Slack DMs and private channels.
+- A directory of **pre-audited markdown files** (authoritative). Each file is one document; each ATX heading section is one chunk. Optional `DREW_DOCS_BASE_URL` turns paths into citation links.
 
 Ingestion:
 
-- `drew ingest` runs manually or nightly; pulls changed content using a service account token (fallback: a v1 user's personal token).
-- Each chunk records, even though v1 does not enforce them: inherited source ACL, customer (if any), sensitivity (`public` / `internal` / `confidential`).
+- `drew ingest` reads the full snapshot under `DREW_DOCS_DIR` on each run. Files removed from the directory have their current chunks superseded.
+- Each chunk records, even though v1 does not enforce them: ACL (empty for markdown), customer (if any), sensitivity (`public` / `internal` / `confidential`).
 - Chunks are **immutable and content-addressed**. Re-ingestion inserts new versions and marks old ones superseded, so traces stay reproducible.
 - Every chunk records the embedding model and version. Changing models means a full re-embed; mixing is never allowed.
 - Ingested text is treated as data: delimited in prompts, never as instructions.
@@ -44,7 +40,7 @@ Ingestion:
 | Concern | Choice |
 |---|---|
 | Language | Rust, single crate, one binary: `drew serve`, `drew ingest`, `drew eval` |
-| Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `server`, `eval` |
+| Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `server`, `slack`, `eval` |
 | Store | Postgres + pgvector (Docker Compose for the demo; Aurora later, where native RLS covers the security phase) |
 | Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (SAP identifiers like `S_TCODE`, `AGR_USERS` embed poorly) |
 | Embeddings, "why" LLM | Amazon Bedrock (AI Council approved), dev AWS account. For local development, any OpenAI-compatible server (Ollama, llama.cpp), e.g. `bge-m3` and `qwen3:14b` |
@@ -65,7 +61,8 @@ OpenAI-compatible:
 Response:
 
 - `choices[0].message.content` — markdown answer in the per-category format, with numbered citations.
-- Top-level `drew` object — category, per-step scores and thresholds, outcome (`answered` / `declined`), citations (chunk id, version, title, URL, excerpt), and the full trace.
+- Top-level `drew` object — category, outcome (`answered` / `declined`), optional halt metadata, verdict, and citations (chunk id, version, title, URL, excerpt). **No trace or per-step scores** in the chat response; those are audit data on `GET /v1/runs/{id}`.
+- `DREW_ADMIN_USERS` may read any persisted run (for example Slack runs stored as `slack:{user_id}`).
 
 Per-category format:
 
@@ -286,7 +283,7 @@ Designed, not built:
 - `confidential` chunks restricted to a Drew-owned maintainers group.
 - Customers see only chunks with their own customer label or none.
 - Event-driven ingestion (webhooks, Slack Events API) with revocation effective within 1 hour and freshness within 24 hours, plus a nightly permission resync.
-- Slack bot answering only in DMs or ephemeral messages.
+- Slack bot hardening beyond v1 (channel allowlists, rate limits).
 - EKS deployment through the shared GitOps repos, Aurora, SageMaker for System One.
 - Audit log retention: 1 year.
 

@@ -328,7 +328,7 @@ fn example_golden_set_parses_and_is_marked_synthetic() {
 
 #[test]
 fn golden_line_round_trips_through_serde() {
-    let line = r#"{"id":"q1","question":"Which?","category":"choice","expected":"B","relevant_chunks":["jira:ARM-1#c1"],"source_thread":"https://x"}"#;
+    let line = r#"{"id":"q1","question":"Which?","category":"choice","expected":"B","relevant_chunks":["markdown:arm-1.md#c1"],"source_thread":"https://x"}"#;
     let parsed = golden::parse(line).unwrap();
     assert_eq!(parsed[0].expected, Expected::Choice("B".into()));
     assert!(!parsed[0].synthetic);

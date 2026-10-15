@@ -16,7 +16,7 @@ struct Cli {
 enum Command {
     /// Serve the OpenAI-compatible API.
     Serve(server::Args),
-    /// Pull changed content from the configured sources.
+    /// Ingest the markdown corpus snapshot from DREW_DOCS_DIR.
     Ingest(ingest::Args),
     /// Run the golden set and report per-step metrics.
     Eval(eval::Args),
