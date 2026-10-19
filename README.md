@@ -72,16 +72,16 @@ Each step is typed, so a pipeline with steps in the wrong order does not compile
 
 ## Latest evaluation
 
-DaaS golden set (`eval/golden/daas.jsonl`, 58 questions), 2026-10-19, local models: `bge-m3` embeddings, Kev 4B for System One, `qwen3:14b` for Explain. Full runs and traces: [`eval/results/daas-2026-10-19.json`](eval/results/daas-2026-10-19.json).
+The benchmark is the DaaS golden set (`eval/golden/daas.jsonl`, 58 questions), run on 2026-10-19 at `e35960e` with local models: `bge-m3` embeddings, Kev 4B for System One (Classify, Rerank, Answer) and `qwen3:14b` for Explain. Config: [`config/drew.json`](config/drew.json). Full runs, traces and setup: [`eval/results/daas-2026-10-19-v3.json`](eval/results/daas-2026-10-19-v3.json). Gate later runs against it with `--baseline`.
 
-| Scope | Runs | Classify | Recall@50 | Hit@5 | Declined | Failed | Citations valid |
-|---|---|---|---|---|---|---|---|
-| Overall | 58 | 82.8% | 78.4% | 36.2% | 3.4% | 0.0% | 100.0% |
-| Boolean | 15 | 93.3% | 56.7% | 20.0% | 6.7% | 0.0% | 100.0% |
-| Choice | 1 | 100.0% | 100.0% | 100.0% | 0.0% | 0.0% | 100.0% |
-| Open | 42 | 78.6% | 85.7% | 40.5% | 2.4% | 0.0% | 100.0% |
+| Scope | Runs | Classify | Recall@50 | Hit@5 | Precision | Declined | Failed | Citations valid |
+|---|---|---|---|---|---|---|---|---|
+| Overall | 58 | 93.1% | 78.4% | 70.7% | 71.4% | 17.2% | 0.0% | 100.0% |
+| Boolean | 15 | 93.3% | 56.7% | 46.7% | 83.3% | 60.0% | 0.0% | 100.0% |
+| Choice | 1 | 100.0% | 100.0% | 100.0% | 0.0% | 0.0% | 0.0% | 100.0% |
+| Open | 42 | 92.9% | 85.7% | 78.6% | - | 2.4% | 0.0% | 100.0% |
 
-Retrieval usually finds the section that answers the question, but Rerank keeps it in the top 5 only about a third of the time; that is the step to improve next. Answer precision is left out because the Answer step does not exist yet, so decisive questions have no verdict to grade.
+Every yes/no verdict Kev gave was right (5 of 5); precision also counts Q50, which was classified `open` and so has no verdict, and the choice question, which takes the `open` path until `Answer<Choice>` exists. Most yes/no questions decline at the Answer threshold (0.7) because Kev 4B's probability of yes sits between 0.3 and 0.7 on them. The first run of the day, before the Answer step and the fused Rerank, scored hit@5 36% and classification 83% ([`daas-2026-10-19.json`](eval/results/daas-2026-10-19.json)).
 
 ## Running locally
 
