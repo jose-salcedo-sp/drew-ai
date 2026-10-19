@@ -2,6 +2,7 @@
 
 pub mod golden;
 pub mod metrics;
+pub mod progress;
 pub mod tune;
 
 use std::{fs, path::PathBuf, sync::Arc};
@@ -91,7 +92,9 @@ pub async fn run_golden(answerer: Arc<dyn Answerer>, args: RunArgs) -> anyhow::R
     let golden = golden::parse(&text).with_context(|| format!("in {}", args.golden.display()))?;
     let baseline: Option<Baseline> = args.baseline.as_deref().map(read_json).transpose()?;
 
-    let results = metrics::evaluate(answerer.as_ref(), golden, args.concurrency).await;
+    let bar = progress::Bar::new(golden.len(), args.concurrency);
+    let results = metrics::evaluate(answerer.as_ref(), golden, args.concurrency, &bar).await;
+    bar.finish();
     write_json(&args.out, &results)?;
     println!("{}", results.metrics);
     println!("Results written to {}", args.out.display());

@@ -5,7 +5,7 @@ use chrono::Utc;
 
 use super::{
     golden::{Expected, GoldenQuestion, YesNo},
-    metrics::{Baseline, EvalRun, Metric, MetricName, Results, evaluate, regressions},
+    metrics::{Baseline, EvalRun, Metric, MetricName, Progress, Results, evaluate, regressions},
     tune::{Candidate, tune},
     *,
 };
@@ -290,7 +290,7 @@ fn fixture() -> Vec<(GoldenQuestion, RunReport)> {
 
 async fn evaluate_fixture(runs: &[(GoldenQuestion, RunReport)]) -> Results {
     let golden = runs.iter().map(|(golden, _)| golden.clone()).collect();
-    evaluate(&Scripted::new(runs), golden, 2).await
+    evaluate(&Scripted::new(runs), golden, 2, &()).await
 }
 
 fn metric(value: f64, n: usize) -> Metric {
@@ -324,6 +324,18 @@ fn example_golden_set_parses_and_is_marked_synthetic() {
     );
     let categories: Vec<CategoryKind> = questions.iter().map(|q| q.expected.category()).collect();
     assert_eq!(categories, metrics::CATEGORIES);
+}
+
+#[test]
+fn daas_golden_set_parses_and_points_at_markdown_chunks() {
+    let questions = golden::parse(include_str!("../../eval/golden/daas.jsonl")).unwrap();
+    assert!(questions.len() >= 50);
+    assert!(questions.iter().all(|q| {
+        !q.relevant_chunks.is_empty()
+            && q.relevant_chunks
+                .iter()
+                .all(|c| c.0.starts_with("markdown:") && c.0.contains('#'))
+    }));
 }
 
 #[test]
@@ -502,6 +514,64 @@ fn citation_validity_checks_versions_and_claim_provenance() {
     }
 }
 
+#[derive(Default)]
+struct RecordingProgress {
+    started: std::sync::Mutex<Vec<String>>,
+    finished: std::sync::Mutex<Vec<String>>,
+}
+
+impl Progress for RecordingProgress {
+    fn started(&self, golden: &GoldenQuestion) {
+        self.started.lock().unwrap().push(golden.id.clone());
+    }
+
+    fn finished(&self, run: &EvalRun, _: std::time::Duration) {
+        self.finished.lock().unwrap().push(run.golden.id.clone());
+    }
+}
+
+#[tokio::test]
+async fn progress_sees_every_run_and_results_keep_golden_order() {
+    let runs = fixture();
+    let golden: Vec<GoldenQuestion> = runs.iter().map(|(golden, _)| golden.clone()).collect();
+    let ids: Vec<String> = golden.iter().map(|g| g.id.clone()).collect();
+    let progress = RecordingProgress::default();
+
+    let results = evaluate(&Scripted::new(&runs), golden, 3, &progress).await;
+
+    let mut started = progress.started.into_inner().unwrap();
+    let mut finished = progress.finished.into_inner().unwrap();
+    started.sort();
+    finished.sort();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(started, sorted);
+    assert_eq!(finished, sorted);
+    let order: Vec<String> = results.runs.iter().map(|r| r.golden.id.clone()).collect();
+    assert_eq!(order, ids);
+}
+
+#[tokio::test]
+async fn progress_line_shows_status_scores_and_the_halt() {
+    let results = evaluate_fixture(&fixture()).await;
+    let elapsed = std::time::Duration::from_millis(41_200);
+    let by_id = |id: &str| results.runs.iter().find(|r| r.golden.id == id).unwrap();
+
+    let answered = progress::line(by_id("o2"), elapsed, 3, 58);
+    assert!(
+        answered.contains("ANSWERED [   41.2s] ( 3/58) o2 open"),
+        "{answered}"
+    );
+    assert!(
+        answered.contains("classify ✓  hit@5 ✓  recall 100%  answer -"),
+        "{answered}"
+    );
+
+    let failed = progress::line(by_id("o1"), elapsed, 4, 58);
+    assert!(failed.contains("FAILED"), "{failed}");
+    assert!(failed.contains("at classify:"), "{failed}");
+}
+
 #[tokio::test]
 async fn canned_failures_count_only_toward_failure_rate() {
     let answerer = CannedAnswerer {
@@ -509,7 +579,7 @@ async fn canned_failures_count_only_toward_failure_rate() {
         outcome: failed("pipeline"),
     };
     let golden = fixture().into_iter().map(|(golden, _)| golden).collect();
-    let results = evaluate(&answerer, golden, 3).await;
+    let results = evaluate(&answerer, golden, 3, &()).await;
     let overall = &results.metrics.overall;
     assert_metric(overall.failure_rate, metric(1.0, 5));
     assert_metric(overall.decline_rate, metric(0.0, 5));

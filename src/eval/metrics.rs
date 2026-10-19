@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fmt,
+    time::{Duration, Instant},
 };
 
 use futures::{StreamExt, stream};
@@ -55,21 +56,40 @@ pub struct RunScores {
     pub citations_valid: Option<bool>,
 }
 
+/// Told about each golden question as its run starts and finishes, in completion order.
+pub trait Progress: Sync {
+    fn started(&self, golden: &GoldenQuestion);
+    fn finished(&self, run: &EvalRun, elapsed: Duration);
+}
+
+/// Reports nothing.
+impl Progress for () {
+    fn started(&self, _: &GoldenQuestion) {}
+    fn finished(&self, _: &EvalRun, _: Duration) {}
+}
+
 /// Answers every golden question, at most `concurrency` at a time, and scores the runs.
+/// Runs finish in any order; `Results` keeps the golden set's order.
 pub async fn evaluate(
     answerer: &dyn Answerer,
     golden: Vec<GoldenQuestion>,
     concurrency: usize,
+    progress: &dyn Progress,
 ) -> Results {
-    let runs = stream::iter(golden)
-        .map(|golden| async move {
+    let mut runs: Vec<(usize, EvalRun)> = stream::iter(golden.into_iter().enumerate())
+        .map(|(index, golden)| async move {
+            progress.started(&golden);
+            let start = Instant::now();
             let report = answerer.answer(golden.question.clone()).await;
-            EvalRun::new(golden, report)
+            let run = EvalRun::new(golden, report);
+            progress.finished(&run, start.elapsed());
+            (index, run)
         })
-        .buffered(concurrency.max(1))
+        .buffer_unordered(concurrency.max(1))
         .collect()
         .await;
-    Results::new(runs)
+    runs.sort_by_key(|(index, _)| *index);
+    Results::new(runs.into_iter().map(|(_, run)| run).collect())
 }
 
 impl Results {

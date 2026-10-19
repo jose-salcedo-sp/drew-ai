@@ -87,7 +87,7 @@ Switching embedding models requires `drew ingest --reembed`.
 |---|---|
 | `drew serve` | OpenAI API plus optional Slack bot |
 | `drew ingest` | Snapshot ingest from `DREW_DOCS_DIR`; `--reembed` after changing the embedding model |
-| `drew eval run …` / `drew eval tune …` | Golden-set metrics and threshold tuning |
+| `drew eval run …` / `drew eval tune …` | Golden-set metrics and threshold tuning. `eval/golden/daas.jsonl` holds DaaS's own golden questions (`_ops/EVAL.md`, held out of the corpus): `drew eval run --golden eval/golden/daas.jsonl --out eval/results/daas.json --concurrency 2` |
 
 ## Configuration
 
