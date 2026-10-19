@@ -4,7 +4,7 @@ use crate::{
     domain::{CategoryKind, Question, Score},
     pipeline::report::{Answer, CannedAnswerer, Outcome, Verdict},
     server::{AppState, auth::AdminUsers},
-    slack::{fakes::FakeSlack, strip_mentions},
+    slack::{Bot, SlackArgs, fakes::FakeSlack, strip_mentions},
     store::fakes::MemoryRunStore,
 };
 
@@ -17,6 +17,26 @@ fn answered() -> Outcome {
         why: vec![],
         citations: vec![],
     })
+}
+
+#[test]
+fn empty_tokens_leave_the_bot_off() {
+    let args = |app: Option<&str>, bot: Option<&str>| SlackArgs {
+        app_token: app.map(Into::into),
+        bot_token: bot.map(Into::into),
+    };
+    assert!(Bot::from_args(&args(None, None)).unwrap().is_none());
+    assert!(
+        Bot::from_args(&args(Some(""), Some(" ")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(Bot::from_args(&args(Some("xapp-1"), Some(""))).is_err());
+    assert!(
+        Bot::from_args(&args(Some("xapp-1"), Some("xoxb-1")))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

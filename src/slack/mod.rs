@@ -33,11 +33,13 @@ pub struct Bot {
 }
 
 impl Bot {
+    /// An empty token counts as unset, as in `.env.example`.
     pub fn from_args(args: &SlackArgs) -> anyhow::Result<Option<Self>> {
-        match (&args.app_token, &args.bot_token) {
+        let set = |token: &Option<String>| token.clone().filter(|t| !t.trim().is_empty());
+        match (set(&args.app_token), set(&args.bot_token)) {
             (None, None) => Ok(None),
             (Some(app), Some(bot)) => Ok(Some(Self {
-                api: Arc::new(SlackClient::new(app.clone(), bot.clone())),
+                api: Arc::new(SlackClient::new(app, bot)),
             })),
             _ => {
                 anyhow::bail!("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must both be set or both unset")
