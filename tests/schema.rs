@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration-test helpers; clippy exempts only #[test] functions"
+)]
+
 use drew::llm::EMBEDDING_DIM;
 use pgvector::Vector;
 use sqlx::PgPool;

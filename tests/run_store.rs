@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration-test helpers; clippy exempts only #[test] functions"
+)]
+
 use std::sync::Arc;
 
 use axum::{

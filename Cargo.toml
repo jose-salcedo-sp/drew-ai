@@ -7,6 +7,14 @@ rust-version = "1.99"
 [lints.clippy]
 # `Halted` carries the whole trace by design; halting is the rare path.
 result_large_err = "allow"
+# A panic outside tests states its invariant: `expect("...")`, never a bare `unwrap()`. Tests are exempt (clippy.toml).
+unwrap_used = "deny"
+# Unfinished or debugging code does not land.
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# A `std` lock guard held across `.await` blocks the runtime thread and can deadlock it.
+await_holding_lock = "deny"
 
 [dependencies]
 async-trait = "0.1.92"
