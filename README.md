@@ -27,7 +27,55 @@ Not built yet: the Answer step (milestone 6), so `boolean`, `choice`, and `ranki
 Classify ∥ Retrieve → Rerank → Explain → Verify
 ```
 
+```mermaid
+sequenceDiagram
+    actor C as Client (API or Slack)
+    participant S as drew serve
+    participant P as Pipeline
+    participant K as System One (Kev)
+    participant E as Embeddings
+    participant DB as Postgres + pgvector
+    participant L as Explain LLM
+
+    C->>S: POST /v1/chat/completions (bearer key)
+    S->>P: last user message as the question
+    par Classify
+        P->>K: one choice over boolean, choice, ranking, open
+        K-->>P: category and its probability
+    and Retrieve
+        P->>E: embed the question
+        E-->>P: query vector
+        P->>DB: full text top 50 and vector top 50, fused by RRF
+        DB-->>P: 50 chunks, with neighbouring sections as context
+    end
+    Note over P: Until Answer lands (milestone 6), every category takes the open path
+    loop Rerank: each of the top 25 matches
+        P->>K: does this text help answer the question?
+        K-->>P: probability of yes
+    end
+    Note over P: Rerank keeps the 5 most likely matches
+    P->>L: Explain: question and 5 sources, delimited as data
+    L-->>P: claims as JSON, each citing chunk ids
+    Note over P: Verify: an uncited claim, or a citation outside<br/>this run's chunks, declines the run
+    P-->>S: run report (answered, declined or failed) and trace
+    S->>DB: save the run and its trace
+    S-->>C: answer with numbered citations and the run id
+```
+
 Each step is typed, so a pipeline with steps in the wrong order does not compile. Verify rejects any claim without a citation, or citing a chunk the run did not retrieve. Every run, including declines and failures, is stored with a trace of each step's model, prompt version, score, and raw output.
+
+## Latest evaluation
+
+DaaS golden set (`eval/golden/daas.jsonl`, 58 questions), 2026-10-19, local models: `bge-m3` embeddings, Kev 4B for System One, `qwen3:14b` for Explain. Full runs and traces: [`eval/results/daas-2026-10-19.json`](eval/results/daas-2026-10-19.json).
+
+| Scope | Runs | Classify | Recall@50 | Hit@5 | Declined | Failed | Citations valid |
+|---|---|---|---|---|---|---|---|
+| Overall | 58 | 82.8% | 78.4% | 36.2% | 3.4% | 0.0% | 100.0% |
+| Boolean | 15 | 93.3% | 56.7% | 20.0% | 6.7% | 0.0% | 100.0% |
+| Choice | 1 | 100.0% | 100.0% | 100.0% | 0.0% | 0.0% | 100.0% |
+| Open | 42 | 78.6% | 85.7% | 40.5% | 2.4% | 0.0% | 100.0% |
+
+Retrieval usually finds the section that answers the question, but Rerank keeps it in the top 5 only about a third of the time; that is the step to improve next. Answer precision is left out because the Answer step does not exist yet, so decisive questions have no verdict to grade.
 
 ## Running locally
 
