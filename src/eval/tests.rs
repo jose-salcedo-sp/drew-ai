@@ -611,6 +611,7 @@ async fn baseline_gate_passes_on_equal_metrics_and_fails_on_regression() {
     let baseline = Baseline {
         metrics: baseline_results.metrics.clone(),
         tolerances: Default::default(),
+        runs: vec![],
     };
     assert_eq!(regressions(&baseline, &baseline_results.metrics), vec![]);
 
@@ -645,6 +646,7 @@ async fn baseline_gate_treats_rising_decline_rate_and_lost_metrics_as_regression
     let baseline = Baseline {
         metrics: evaluate_fixture(&runs).await.metrics,
         tolerances: Default::default(),
+        runs: vec![],
     };
 
     // b1 declines: decline rate rises, and boolean precision and citation validity lose their only run.
@@ -693,6 +695,7 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
         out: dir.join(out),
         baseline,
         concurrency: 2,
+        questions: vec![],
     };
 
     run_golden(
@@ -756,6 +759,68 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
 }
 
 #[tokio::test]
+async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
+    let runs = fixture();
+    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    fs::create_dir_all(&dir).unwrap();
+    let golden_path = dir.join("golden.jsonl");
+    let golden_text: Vec<String> = runs
+        .iter()
+        .map(|(golden, _)| serde_json::to_string(golden).unwrap())
+        .collect();
+    fs::write(&golden_path, golden_text.join("\n")).unwrap();
+    let args = |out: &str, baseline: Option<PathBuf>, questions: &[&str]| RunArgs {
+        golden: golden_path.clone(),
+        out: dir.join(out),
+        baseline,
+        concurrency: 2,
+        questions: questions.iter().map(|id| (*id).to_owned()).collect(),
+    };
+    run_golden(
+        Arc::new(Scripted::new(&runs)),
+        args("all.json", None, &[]),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Against the whole baseline, o2 alone would "lose" precision; restricted to o2 it matches.
+    let baseline = Some(dir.join("all.json"));
+    run_golden(
+        Arc::new(Scripted::new(&runs)),
+        args("o2.json", baseline.clone(), &["o2"]),
+        None,
+    )
+    .await
+    .unwrap();
+    let only: Results = read_json(&dir.join("o2.json")).unwrap();
+    let ids: Vec<&str> = only.runs.iter().map(|run| run.golden.id.as_str()).collect();
+    assert_eq!(ids, ["o2"]);
+
+    let error = run_golden(
+        Arc::new(Scripted::new(&runs)),
+        args("nope.json", None, &["o2", "missing"]),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#?}").contains("\"missing\""), "{error:#?}");
+
+    let metrics_only = serde_json::json!({ "metrics": only.metrics });
+    write_json(&dir.join("metrics-only.json"), &metrics_only).unwrap();
+    let error = run_golden(
+        Arc::new(Scripted::new(&runs)),
+        args("subset.json", Some(dir.join("metrics-only.json")), &["o2"]),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("no recorded runs"), "{error}");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn golden_parse_errors_surface_through_the_run_command() {
     let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
@@ -774,6 +839,7 @@ async fn golden_parse_errors_surface_through_the_run_command() {
             out: dir.join("out.json"),
             baseline: None,
             concurrency: 1,
+            questions: vec![],
         },
         None,
     )

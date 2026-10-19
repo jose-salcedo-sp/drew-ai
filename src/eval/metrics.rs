@@ -417,6 +417,36 @@ pub struct Baseline {
     /// Allowed drop (or rise, for decline and failure rates) before a metric counts as regressed. Missing means 0.
     #[serde(default)]
     pub tolerances: BTreeMap<MetricName, f64>,
+    /// The runs behind `metrics`, when the file is a results file; needed to compare a subset of questions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<EvalRun>,
+}
+
+impl Baseline {
+    /// The baseline as if it had run only the questions in `ids`.
+    #[eros::context("restricting the baseline to {:?}", ids)]
+    pub fn restricted_to(self, ids: &[String]) -> eros::Result<Self> {
+        eros::ensure!(
+            !self.runs.is_empty(),
+            "the baseline has no recorded runs, so it cannot be compared on a subset of questions"
+        );
+        let runs: Vec<EvalRun> = self
+            .runs
+            .into_iter()
+            .filter(|run| ids.contains(&run.golden.id))
+            .collect();
+        let missing: Vec<&str> = ids
+            .iter()
+            .filter(|id| !runs.iter().any(|run| run.golden.id == **id))
+            .map(String::as_str)
+            .collect();
+        eros::ensure!(missing.is_empty(), "the baseline did not run {missing:?}");
+        Ok(Self {
+            metrics: MetricsReport::of(&runs),
+            tolerances: self.tolerances,
+            runs,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

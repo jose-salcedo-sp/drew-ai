@@ -24,6 +24,7 @@ use crate::{
 };
 
 use self::{
+    golden::GoldenQuestion,
     metrics::{Baseline, Results, RunSetup},
     tune::Candidate,
 };
@@ -67,6 +68,10 @@ pub struct RunArgs {
     /// Questions answered at once.
     #[arg(long, default_value_t = 4)]
     pub concurrency: usize,
+    /// Run only these golden question ids (repeatable, or comma-separated). With `--baseline`, the baseline's
+    /// metrics are recomputed from its runs of the same questions, so a subset is compared like for like.
+    #[arg(long = "question", value_name = "ID", value_delimiter = ',')]
+    pub questions: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -107,8 +112,13 @@ pub async fn run_golden(
     args: RunArgs,
     setup: Option<RunSetup>,
 ) -> eros::Result<()> {
-    let golden = read_golden(&args.golden)?;
-    let baseline: Option<Baseline> = args.baseline.as_deref().map(read_json).transpose()?;
+    let golden = select(read_golden(&args.golden)?, &args.questions)?;
+    let mut baseline: Option<Baseline> = args.baseline.as_deref().map(read_json).transpose()?;
+    if !args.questions.is_empty() {
+        baseline = baseline
+            .map(|baseline| baseline.restricted_to(&args.questions))
+            .transpose()?;
+    }
 
     if let Some(setup) = &setup {
         print_setup(setup);
@@ -196,8 +206,26 @@ fn git_describe() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Every golden question when `ids` is empty, else exactly those, in golden-set order.
+#[eros::context("selecting golden questions {:?}", ids)]
+fn select(golden: Vec<GoldenQuestion>, ids: &[String]) -> eros::Result<Vec<GoldenQuestion>> {
+    if ids.is_empty() {
+        return Ok(golden);
+    }
+    let unknown: Vec<&str> = ids
+        .iter()
+        .filter(|id| !golden.iter().any(|question| question.id == **id))
+        .map(String::as_str)
+        .collect();
+    eros::ensure!(unknown.is_empty(), "no golden question with id {unknown:?}");
+    Ok(golden
+        .into_iter()
+        .filter(|question| ids.contains(&question.id))
+        .collect())
+}
+
 #[eros::context("reading golden set {}", path.display())]
-fn read_golden(path: &std::path::Path) -> eros::Result<Vec<golden::GoldenQuestion>> {
+fn read_golden(path: &std::path::Path) -> eros::Result<Vec<GoldenQuestion>> {
     let text = fs::read_to_string(path)?;
     Ok(golden::parse(&text)?)
 }
