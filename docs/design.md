@@ -25,7 +25,8 @@ Guiding constraints:
 
 Sources:
 
-- A directory of **pre-audited markdown files** (authoritative). Each file is one document; each ATX heading section is one chunk. Optional `DREW_DOCS_BASE_URL` turns paths into citation links.
+- A directory of **pre-audited markdown files**. Each file is one document; each ATX heading section is one chunk. Optional `DREW_DOCS_BASE_URL` turns paths into citation links.
+- Two layers, chosen by path under the root: `DREW_DOCS_AUTHORITATIVE` (Drew's settled answers; default the whole root) and `DREW_DOCS_EVIDENCE` (supporting material, ingested with `authoritative = false`). `DREW_DOCS_SKIP` leaves paths out even inside a layer. The longest listed path containing a file decides its layer; files under no listed path are not ingested. This keeps answer keys, drafts and working notes out of the corpus.
 
 Ingestion:
 
