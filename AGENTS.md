@@ -4,13 +4,16 @@
 
 ## Done
 
-Work is done when all three pass with the database running (`docker compose up -d --wait db`):
+Work is done when all four pass with the database running (`docker compose up -d --wait db`):
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo nextest run
+cargo test --doc
 ```
+
+Tests run under [cargo-nextest](https://nexte.st), configured in `.config/nextest.toml`. It does not run doctests, and the `compile_fail` doctests are what prove invalid pipelines do not compile, so `cargo test --doc` stays.
 
 ## Contracts
 
@@ -21,7 +24,7 @@ These files are shared between modules: `src/domain.rs`, `src/pipeline/{mod,trac
 - Queries use runtime-checked `sqlx::query` / `query_as`; the `query!` macros need a live database at compile time.
 - Migrations are new files named `YYYYMMDDHHMMSS_description.sql`. Applied migrations are immutable.
 - Database tests use `#[sqlx::test(migrator = "drew::store::MIGRATOR")]`, which gives each test its own database.
-- Every external service (Bedrock, System One, Confluence, Jira, Slack) sits behind a trait. Tests use the fakes in `*/fakes.rs` or `wiremock`, so `cargo test` runs offline with no credentials.
+- Every external service (Bedrock, System One, Confluence, Jira, Slack) sits behind a trait. Tests use the fakes in `*/fakes.rs` or `wiremock`, so the tests run offline with no credentials.
 - `Step` and `Pipeline` use `impl Future + Send` for static dispatch; client traits use `#[async_trait]` so they work as `Arc<dyn Trait>`.
 - Errors: `anyhow` across module boundaries, `thiserror` for errors a caller matches on.
 - `Cargo.toml` already lists the expected crates; add one only when none of them covers the need.

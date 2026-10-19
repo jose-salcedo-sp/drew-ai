@@ -110,7 +110,8 @@ With the database running:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo nextest run        # brew install cargo-nextest, or cargo install cargo-nextest --locked
+cargo test --doc         # nextest does not run doctests; the compile_fail ones guard the pipeline types
 ```
 
 Conventions are in [AGENTS.md](AGENTS.md).
