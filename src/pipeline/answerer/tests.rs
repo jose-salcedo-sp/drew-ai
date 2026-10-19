@@ -411,6 +411,25 @@ async fn a_boolean_question_gets_system_one_s_verdict_and_the_llm_s_reasons() {
 }
 
 #[tokio::test]
+async fn explain_may_cite_only_this_run_s_sources() {
+    let agr = agr_users();
+    let chat = Arc::new(ScriptedChat::replying([reply(json!([
+        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
+    ]))]));
+
+    let report = ask(corpus(), &chat).await;
+
+    let schema = chat.requests()[0].json_schema.clone().unwrap();
+    let allowed =
+        &schema["properties"]["claims"]["items"]["properties"]["chunk_ids"]["items"]["enum"];
+    let TraceRecord::Rerank(rerank) = record(&report, "rerank") else {
+        panic!("expected the rerank record");
+    };
+    let sources: Vec<_> = rerank.chunks.iter().map(|c| json!(c.chunk.id.0)).collect();
+    assert_eq!(allowed, &json!(sources));
+}
+
+#[tokio::test]
 async fn sources_that_contradict_the_verdict_decline_the_run() {
     let chat = Arc::new(ScriptedChat::replying([verdict_reply(true)]));
     let kev = FakeKev {

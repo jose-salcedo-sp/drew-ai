@@ -13,8 +13,8 @@ use crate::{
 use super::{Decided, Reranked};
 
 /// Bump on any change to `SYSTEM`, `prompt`, or `schema`, so traces and eval can tell prompts apart.
-pub const PROMPT_VERSION: &str = "explain-open-v2";
-pub const BOOLEAN_PROMPT_VERSION: &str = "explain-boolean-v1";
+pub const PROMPT_VERSION: &str = "explain-open-v3";
+pub const BOOLEAN_PROMPT_VERSION: &str = "explain-boolean-v2";
 
 const MAX_TOKENS: u32 = 2048;
 
@@ -90,7 +90,7 @@ impl<TCategory> Explain<TCategory> {
             user,
             max_tokens: MAX_TOKENS,
             temperature: 0.0,
-            json_schema: Some(schema(verdict.is_some())),
+            json_schema: Some(schema(&sources, verdict.is_some())),
         };
         let model = self.chat.model();
         let response =
@@ -332,8 +332,14 @@ fn escape(text: &str) -> String {
     escaped
 }
 
+/// `chunk_ids` may only name this run's sources, so the model cannot cite a chunk id it misremembered.
 /// `verdict` adds the required `contradicts_verdict` flag.
-fn schema(verdict: bool) -> serde_json::Value {
+fn schema(sources: &Reranked, verdict: bool) -> serde_json::Value {
+    let ids: Vec<&str> = sources
+        .0
+        .iter()
+        .map(|hit| hit.chunk.id.0.as_str())
+        .collect();
     let mut schema = json!({
         "type": "object",
         "properties": {
@@ -350,7 +356,7 @@ fn schema(verdict: bool) -> serde_json::Value {
                         "chunk_ids": {
                             "type": "array",
                             "description": "The chunk_id of every source that supports this claim.",
-                            "items": { "type": "string" },
+                            "items": { "type": "string", "enum": ids },
                             "minItems": 1
                         }
                     },
