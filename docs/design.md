@@ -245,6 +245,7 @@ Rules:
 - A `choice` with fewer than 2 candidates, or a `ranking` without a stated criterion, is reclassified as `open`.
 - Model output is deserialized into a raw DTO, then converted with `TryFrom` into domain types. Any conversion failure halts as a decline.
 - The `Explain` LLM must flag when cited sources contradict the System One verdict.
+- `Explain` applies the corpus's answering rules from its system prompt, never from retrieved text: authoritative sources outrank evidence; generation, store, vocabulary and scope are settled or named; no identifier that the sources lack; source provenance tags kept and the model's own inferences tagged `[INF]`; sandbox and tenant numbers never generalised; recorded unknowns stated, not guessed.
 - `VerifiedAnswer` is only constructible inside `Verify`, which rejects any claim without a citation and any citation not among this run's retrieved chunks (runtime membership check).
 
 ### 5.6 Trace
