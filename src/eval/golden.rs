@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use eros::IntoUnion;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -88,7 +89,7 @@ pub struct GoldenError {
 }
 
 /// Parses a JSONL golden set. Blank lines are skipped; line numbers in errors are 1-based.
-pub fn parse(text: &str) -> Result<Vec<GoldenQuestion>, GoldenError> {
+pub fn parse(text: &str) -> eros::Result<Vec<GoldenQuestion>, (GoldenError,)> {
     let mut questions = Vec::new();
     let mut ids = HashSet::new();
     for (index, raw) in text.lines().enumerate() {
@@ -97,11 +98,12 @@ pub fn parse(text: &str) -> Result<Vec<GoldenQuestion>, GoldenError> {
             continue;
         }
         let error = |message: String| GoldenError { line, message };
-        let question: GoldenQuestion =
-            serde_json::from_str(raw).map_err(|e| error(e.to_string()))?;
-        validate(&question).map_err(error)?;
+        let question: GoldenQuestion = serde_json::from_str(raw)
+            .map_err(|e| error(e.to_string()))
+            .union()?;
+        validate(&question).map_err(error).union()?;
         if !ids.insert(question.id.clone()) {
-            return Err(error(format!("duplicate id `{}`", question.id)));
+            return Err(error(format!("duplicate id `{}`", question.id))).union();
         }
         questions.push(question);
     }

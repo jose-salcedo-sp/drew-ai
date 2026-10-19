@@ -12,7 +12,6 @@ mod tests;
 
 use std::{convert::Infallible, sync::Arc};
 
-use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State, rejection::JsonRejection},
@@ -23,6 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
+use eros::Context;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -76,7 +76,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub async fn run(args: Args) -> eros::Result<()> {
     let pool = store::connect(&args.db).await?;
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
     let state = AppState {
@@ -90,7 +90,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         let bot_state = state.clone();
         tokio::spawn(async move {
             if let Err(error) = bot.run(bot_state, shutdown).await {
-                tracing::error!(error = format!("{error:#}"), "slack bot stopped");
+                tracing::error!(error = format!("{error:#?}"), "slack bot stopped");
             }
         });
     }
@@ -153,7 +153,7 @@ async fn chat_completions(
     let report = state.answerer.answer(question).await;
     let run_id = report.id;
     if let Err(error) = state.runs.save(&user, &report).await {
-        tracing::error!(%run_id, error = format!("{error:#}"), "run not persisted");
+        tracing::error!(%run_id, error = format!("{error:#?}"), "run not persisted");
         return Err(ApiError::internal(
             "run_not_persisted",
             format!("Run {run_id} could not be persisted."),
@@ -183,7 +183,8 @@ async fn chat_completions(
     let events: Vec<Result<Event, Infallible>> = Chunk::pair(drew, content, created)
         .iter()
         .map(|chunk| {
-            let data = serde_json::to_string(chunk).expect("chunk serializes");
+            let data = serde_json::to_string(chunk)
+                .expect("a completion chunk is plain data, which always serializes");
             Ok(Event::default().data(data))
         })
         .chain([Ok(Event::default().data("[DONE]"))])
@@ -222,7 +223,7 @@ async fn get_run(
         .map(RunId::from)
         .map_err(|_| not_found())?;
     let run = state.runs.get(run_id).await.map_err(|error| {
-        tracing::error!(%run_id, error = format!("{error:#}"), "run not loaded");
+        tracing::error!(%run_id, error = format!("{error:#?}"), "run not loaded");
         ApiError::internal("run_store_unavailable", "The run could not be loaded.")
     })?;
     match run {

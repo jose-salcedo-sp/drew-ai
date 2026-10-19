@@ -12,7 +12,7 @@ pub async fn run_socket(
     api: Arc<dyn SlackApi>,
     mut on_event: impl FnMut(Value) + Send,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> anyhow::Result<()> {
+) -> eros::Result<()> {
     let url = api.open_connection().await?;
     let (ws, _) = connect_async(&url).await?;
     let (mut write, mut read) = ws.split();
@@ -30,7 +30,7 @@ pub async fn run_socket(
                         match envelope.get("type").and_then(Value::as_str) {
                             Some("hello") => {}
                             Some("disconnect") => {
-                                anyhow::bail!("slack sent disconnect");
+                                eros::bail!("slack sent disconnect");
                             }
                             Some("events_api") => {
                                 if let Some(id) = envelope.get("envelope_id").and_then(Value::as_str) {
@@ -49,9 +49,9 @@ pub async fn run_socket(
                             None => {}
                         }
                     }
-                    Some(Ok(Message::Close(_))) => anyhow::bail!("slack websocket closed"),
+                    Some(Ok(Message::Close(_))) => eros::bail!("slack websocket closed"),
                     Some(Err(error)) => return Err(error.into()),
-                    None => anyhow::bail!("slack websocket ended"),
+                    None => eros::bail!("slack websocket ended"),
                     _ => {}
                 }
             }

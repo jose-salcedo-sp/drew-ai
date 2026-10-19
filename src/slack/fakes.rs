@@ -13,7 +13,7 @@ pub struct FakeSlack {
 
 #[async_trait]
 impl SlackApi for FakeSlack {
-    async fn open_connection(&self) -> anyhow::Result<String> {
+    async fn open_connection(&self) -> eros::Result<String> {
         Ok(self.ws_url.clone())
     }
 
@@ -22,19 +22,28 @@ impl SlackApi for FakeSlack {
         channel: &str,
         thread_ts: Option<&str>,
         text: &str,
-    ) -> anyhow::Result<String> {
-        self.posts.lock().unwrap().push((
-            channel.to_owned(),
-            thread_ts.map(str::to_owned),
-            text.to_owned(),
-        ));
-        Ok(format!("{}.0001", self.posts.lock().unwrap().len()))
+    ) -> eros::Result<String> {
+        self.posts
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .push((
+                channel.to_owned(),
+                thread_ts.map(str::to_owned),
+                text.to_owned(),
+            ));
+        Ok(format!(
+            "{}.0001",
+            self.posts
+                .lock()
+                .expect("lock poisoned: a test thread panicked while holding it")
+                .len()
+        ))
     }
 
-    async fn update_message(&self, channel: &str, ts: &str, text: &str) -> anyhow::Result<()> {
+    async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()> {
         self.updates
             .lock()
-            .unwrap()
+            .expect("lock poisoned: a test thread panicked while holding it")
             .push((channel.to_owned(), ts.to_owned(), text.to_owned()));
         Ok(())
     }

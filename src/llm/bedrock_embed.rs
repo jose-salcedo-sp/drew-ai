@@ -1,8 +1,8 @@
 //! `Embedder` over Bedrock (Titan Text Embeddings v2 or Cohere Embed v3, 1024 dimensions).
 
-use anyhow::{Context, bail};
 use async_trait::async_trait;
 use aws_sdk_bedrockruntime::{Client, error::DisplayErrorContext, primitives::Blob};
+use eros::{Context, bail};
 use futures::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -40,7 +40,7 @@ pub enum Family {
 
 impl Family {
     /// Accepts plain model ids and cross-region inference profile ids (`us.cohere.embed-english-v3`).
-    pub fn of(model_id: &str) -> anyhow::Result<Self> {
+    pub fn of(model_id: &str) -> eros::Result<Self> {
         if model_id.contains("amazon.titan-embed-text-v2") {
             Ok(Self::TitanV2)
         } else if model_id.contains("cohere.embed-") && model_id.contains("-v3") {
@@ -104,7 +104,7 @@ pub fn requests(family: Family, texts: &[String], purpose: EmbedPurpose) -> Vec<
     }
 }
 
-pub fn parse_response(family: Family, body: &[u8], count: usize) -> anyhow::Result<Vec<Vec<f32>>> {
+pub fn parse_response(family: Family, body: &[u8], count: usize) -> eros::Result<Vec<Vec<f32>>> {
     #[derive(Deserialize)]
     struct Titan {
         embedding: Vec<f32>,
@@ -152,7 +152,7 @@ pub struct BedrockEmbedder {
 }
 
 impl BedrockEmbedder {
-    pub async fn from_args(args: &EmbedArgs) -> anyhow::Result<Self> {
+    pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
         let family = Family::of(&args.embed_model)?;
         let config = aws_config::load_from_env().await;
         Ok(Self {
@@ -162,7 +162,7 @@ impl BedrockEmbedder {
         })
     }
 
-    async fn invoke(&self, request: Request) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn invoke(&self, request: Request) -> eros::Result<Vec<Vec<f32>>> {
         let output = self
             .client
             .invoke_model()
@@ -173,7 +173,7 @@ impl BedrockEmbedder {
             .send()
             .await
             .map_err(|e| {
-                anyhow::anyhow!(
+                eros::error!(
                     "Bedrock InvokeModel {} failed: {}",
                     self.model_id,
                     DisplayErrorContext(e)
@@ -189,11 +189,7 @@ impl Embedder for BedrockEmbedder {
         ModelRef::new(&self.model_id, self.family.profile())
     }
 
-    async fn embed(
-        &self,
-        texts: &[String],
-        purpose: EmbedPurpose,
-    ) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
         let batches: Vec<Vec<Vec<f32>>> = stream::iter(
             requests(self.family, texts, purpose)
                 .into_iter()

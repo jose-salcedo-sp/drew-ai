@@ -1,6 +1,5 @@
 //! `ChatModel` over the Bedrock Converse API, used by `Explain`.
 
-use anyhow::Context;
 use async_trait::async_trait;
 use aws_sdk_bedrockruntime::{
     Client,
@@ -13,6 +12,7 @@ use aws_sdk_bedrockruntime::{
     },
 };
 use aws_smithy_types::{Document, Number};
+use eros::Context;
 use serde_json::Value;
 
 use super::{ChatModel, ChatRequest, ChatResponse, ModelRef};
@@ -58,7 +58,7 @@ impl ChatModel for BedrockChat {
         ModelRef::new(&self.model_id, &self.model_id)
     }
 
-    async fn complete(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+    async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse> {
         let converse = converse_request(&request)?;
         let output = self
             .client
@@ -71,7 +71,7 @@ impl ChatModel for BedrockChat {
             .send()
             .await
             .map_err(|error| {
-                anyhow::anyhow!(
+                eros::error!(
                     "Bedrock Converse with {} failed: {}",
                     self.model_id,
                     DisplayErrorContext(error)
@@ -90,7 +90,7 @@ struct Converse {
     tools: Option<ToolConfiguration>,
 }
 
-fn converse_request(request: &ChatRequest) -> anyhow::Result<Converse> {
+fn converse_request(request: &ChatRequest) -> eros::Result<Converse> {
     let message = Message::builder()
         .role(ConversationRole::User)
         .content(ContentBlock::Text(request.user.clone()))
@@ -108,7 +108,7 @@ fn converse_request(request: &ChatRequest) -> anyhow::Result<Converse> {
     })
 }
 
-fn respond_tool(schema: &Value) -> anyhow::Result<ToolConfiguration> {
+fn respond_tool(schema: &Value) -> eros::Result<ToolConfiguration> {
     let spec = ToolSpecification::builder()
         .name(RESPOND_TOOL)
         .description("Return the response. The input must match the schema.")
@@ -121,9 +121,9 @@ fn respond_tool(schema: &Value) -> anyhow::Result<ToolConfiguration> {
         .build()?)
 }
 
-fn chat_response(output: ConverseOutput, structured: bool) -> anyhow::Result<ChatResponse> {
+fn chat_response(output: ConverseOutput, structured: bool) -> eros::Result<ChatResponse> {
     let Some(Reply::Message(message)) = output.output else {
-        anyhow::bail!(
+        eros::bail!(
             "Bedrock returned no message (stop reason {})",
             output.stop_reason.as_str()
         );

@@ -1,8 +1,8 @@
 //! `RunStore` over the `pipeline_runs` table.
 
-use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use eros::Context;
 use sqlx::{PgPool, Row, types::Json};
 
 use crate::{
@@ -43,19 +43,19 @@ fn category_name(category: CategoryKind) -> &'static str {
     }
 }
 
-fn parse_category(name: &str) -> anyhow::Result<CategoryKind> {
+fn parse_category(name: &str) -> eros::Result<CategoryKind> {
     Ok(match name {
         "boolean" => CategoryKind::Boolean,
         "choice" => CategoryKind::Choice,
         "ranking" => CategoryKind::Ranking,
         "open" => CategoryKind::Open,
-        other => anyhow::bail!("unknown category {other:?}"),
+        other => eros::bail!("unknown category {other:?}"),
     })
 }
 
 #[async_trait]
 impl RunStore for PgRunStore {
-    async fn save(&self, user: &UserId, report: &RunReport) -> anyhow::Result<()> {
+    async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()> {
         sqlx::query(
             "INSERT INTO pipeline_runs (id, user_id, question, category, status, outcome, trace)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -73,7 +73,7 @@ impl RunStore for PgRunStore {
         Ok(())
     }
 
-    async fn get(&self, id: RunId) -> anyhow::Result<Option<StoredRun>> {
+    async fn get(&self, id: RunId) -> eros::Result<Option<StoredRun>> {
         let row = sqlx::query(
             "SELECT user_id, question, category, outcome, trace, created_at
              FROM pipeline_runs WHERE id = $1",

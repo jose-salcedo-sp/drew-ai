@@ -5,9 +5,15 @@ pub mod metrics;
 pub mod progress;
 pub mod tune;
 
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{
+    fs,
+    io::Write as _,
+    path::PathBuf,
+    process::{Command as Process, Stdio},
+    sync::Arc,
+};
 
-use anyhow::Context;
+use chrono::Utc;
 
 use crate::{
     pipeline::{
@@ -18,7 +24,7 @@ use crate::{
 };
 
 use self::{
-    metrics::{Baseline, Results},
+    metrics::{Baseline, Results, RunSetup},
     tune::Candidate,
 };
 
@@ -29,6 +35,7 @@ pub struct Args {
 }
 
 #[derive(Debug, clap::Subcommand)]
+#[expect(clippy::large_enum_variant, reason = "parsed once at startup")]
 pub enum Command {
     /// Answer every golden question and report per-step metrics.
     Run(RunCommand),
@@ -75,26 +82,44 @@ pub struct TuneArgs {
     pub out: Option<PathBuf>,
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub async fn run(args: Args) -> eros::Result<()> {
     match args.command {
         Command::Run(args) => {
             let pool = store::connect(&args.db).await?;
             let answerer = PipelineAnswerer::from_args(pool, &args.pipeline).await?;
-            run_golden(Arc::new(answerer), args.files).await
+            let setup = RunSetup {
+                started_at: Utc::now(),
+                finished_at: None,
+                golden: args.files.golden.display().to_string(),
+                git: git_describe(),
+                config: answerer.config().clone(),
+                models: answerer.models(),
+            };
+            run_golden(Arc::new(answerer), args.files, Some(setup)).await
         }
         Command::Tune(args) => run_tune(args),
     }
 }
 
-pub async fn run_golden(answerer: Arc<dyn Answerer>, args: RunArgs) -> anyhow::Result<()> {
-    let text = fs::read_to_string(&args.golden)
-        .with_context(|| format!("reading {}", args.golden.display()))?;
-    let golden = golden::parse(&text).with_context(|| format!("in {}", args.golden.display()))?;
+/// `setup`, when known, is printed before the first question and recorded in the results file.
+pub async fn run_golden(
+    answerer: Arc<dyn Answerer>,
+    args: RunArgs,
+    setup: Option<RunSetup>,
+) -> eros::Result<()> {
+    let golden = read_golden(&args.golden)?;
     let baseline: Option<Baseline> = args.baseline.as_deref().map(read_json).transpose()?;
 
+    if let Some(setup) = &setup {
+        print_setup(setup);
+    }
     let bar = progress::Bar::new(golden.len(), args.concurrency);
-    let results = metrics::evaluate(answerer.as_ref(), golden, args.concurrency, &bar).await;
+    let mut results = metrics::evaluate(answerer.as_ref(), golden, args.concurrency, &bar).await;
     bar.finish();
+    results.setup = setup.map(|setup| RunSetup {
+        finished_at: Some(Utc::now()),
+        ..setup
+    });
     write_json(&args.out, &results)?;
     println!("{}", results.metrics);
     println!("Results written to {}", args.out.display());
@@ -111,10 +136,10 @@ pub async fn run_golden(answerer: Arc<dyn Answerer>, args: RunArgs) -> anyhow::R
     for regression in &regressions {
         println!("  {regression}");
     }
-    anyhow::bail!("{} metric(s) regressed beyond tolerance", regressions.len())
+    eros::bail!("{} metric(s) regressed beyond tolerance", regressions.len())
 }
 
-pub fn run_tune(args: TuneArgs) -> anyhow::Result<()> {
+pub fn run_tune(args: TuneArgs) -> eros::Result<()> {
     let results: Results = read_json(&args.results)?;
     let candidates: Vec<Candidate> = read_json(&args.candidates)?;
     let report = tune::tune(&results, &candidates);
@@ -126,14 +151,67 @@ pub fn run_tune(args: TuneArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> anyhow::Result<T> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+/// Through `jq -C` when it is installed, so the config reads like any other JSON in the terminal.
+fn print_setup(setup: &RunSetup) {
+    let json = serde_json::json!({
+        "golden": setup.golden,
+        "git": setup.git,
+        "models": setup.models,
+        "config": setup.config,
+    });
+    let pretty = serde_json::to_string_pretty(&json)
+        .expect("the setup is plain data, which always serializes");
+    println!("{}", console::style("    Setup").green().bold());
+    let colour = if console::colors_enabled() {
+        "-C"
+    } else {
+        "-M"
+    };
+    let jq = Process::new("jq")
+        .args([colour, "."])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut jq| {
+            if let Some(mut stdin) = jq.stdin.take() {
+                stdin.write_all(pretty.as_bytes())?;
+            }
+            jq.wait()
+        });
+    if !jq.is_ok_and(|status| status.success()) {
+        println!("{pretty}");
+    }
 }
 
-fn write_json(path: &std::path::Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
+fn git_describe() -> Option<String> {
+    let output = Process::new("git")
+        .args(["describe", "--always", "--dirty"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[eros::context("reading golden set {}", path.display())]
+fn read_golden(path: &std::path::Path) -> eros::Result<Vec<golden::GoldenQuestion>> {
+    let text = fs::read_to_string(path)?;
+    Ok(golden::parse(&text)?)
+}
+
+#[eros::context("reading {}", path.display())]
+fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> eros::Result<T> {
+    let text = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+#[eros::context("writing {}", path.display())]
+fn write_json(path: &std::path::Path, value: &impl serde::Serialize) -> eros::Result<()> {
     let json = serde_json::to_string_pretty(value)?;
-    fs::write(path, json + "\n").with_context(|| format!("writing {}", path.display()))
+    Ok(fs::write(path, json + "\n")?)
 }
 
 #[cfg(test)]

@@ -75,6 +75,9 @@ pub struct RankedChunk {
 pub struct ClassifyRecord {
     pub raw: Option<String>,
     pub category: Option<CategoryKind>,
+    /// What System One chose when its probability was below `classify.min_confidence` and the run fell back to `open`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_from: Option<CategoryKind>,
 }
 
 /// Recall@50 is computed from `chunks`.

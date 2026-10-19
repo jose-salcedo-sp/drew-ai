@@ -249,8 +249,8 @@ struct BrokenRetriever;
 
 #[async_trait]
 impl Retriever for BrokenRetriever {
-    async fn retrieve(&self, _query: &str) -> anyhow::Result<Vec<Retrieved>> {
-        anyhow::bail!("connection refused")
+    async fn retrieve(&self, _query: &str) -> eros::Result<Vec<Retrieved>> {
+        eros::bail!("connection refused")
     }
 }
 
@@ -314,46 +314,172 @@ fn excerpt_cuts_long_text_on_a_char_boundary() {
     assert_eq!(super::excerpt("short"), "short");
 }
 
-#[tokio::test]
-async fn a_boolean_question_takes_the_open_path_and_keeps_its_category() {
-    use std::collections::BTreeMap;
+/// Answers Classify with `category` at `certainty`, Rerank with 0.7 for every match, and Answer with `yes`.
+struct FakeKev {
+    category: &'static str,
+    certainty: f32,
+    yes: f32,
+}
 
-    use crate::llm::system_one::{DecisionAnswer, DecisionResponse, ScriptedSystemOne};
+#[async_trait]
+impl crate::llm::system_one::SystemOne for FakeKev {
+    fn model(&self) -> crate::llm::ModelRef {
+        crate::llm::ModelRef::new("fake-kev", "1")
+    }
 
-    let agr = agr_users();
-    let chat = Arc::new(ScriptedChat::replying([reply(json!([
-        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
-    ]))]));
-    let system_one = Arc::new(ScriptedSystemOne::new([Ok(DecisionResponse {
-        answers: BTreeMap::from([(
-            "category".into(),
-            DecisionAnswer::Choice {
-                choice: "boolean".into(),
-                confidence: 0.8,
-                probabilities: BTreeMap::from([("boolean".into(), 0.9)]),
+    async fn decide(
+        &self,
+        request: crate::llm::system_one::DecisionRequest,
+    ) -> eros::Result<crate::llm::system_one::DecisionResponse> {
+        use std::collections::BTreeMap;
+
+        use crate::llm::system_one::{DecisionAnswer, DecisionResponse};
+
+        let id = request.questions.into_keys().next().unwrap();
+        let answer = match id.as_str() {
+            "category" => DecisionAnswer::Choice {
+                choice: self.category.into(),
+                confidence: self.certainty,
+                probabilities: BTreeMap::from([(self.category.into(), self.certainty)]),
             },
-        )]),
-    })]));
+            "answer" => DecisionAnswer::Noul { noul: self.yes },
+            _ => DecisionAnswer::Noul { noul: 0.7 },
+        };
+        Ok(DecisionResponse {
+            answers: BTreeMap::from([(id, answer)]),
+        })
+    }
+}
 
-    let report = answerer(corpus(), &chat)
-        .with_classifier(system_one)
-        .answer(Question::new("Does AGR_USERS map users to roles?"))
-        .await;
+const YES_NO: &str = "Does AGR_USERS map users to roles?";
+
+fn verdict_reply(contradicts: bool) -> String {
+    json!({
+        "claims": [{ "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr_users().id] }],
+        "contradicts_verdict": contradicts,
+    })
+    .to_string()
+}
+
+async fn ask_kev(kev: FakeKev, chat: &Arc<ScriptedChat>, config: &str) -> RunReport {
+    answerer(corpus(), chat)
+        .with_system_one(Arc::new(kev))
+        .with_config(PipelineConfig::parse(config).unwrap())
+        .answer(Question::new(YES_NO))
+        .await
+}
+
+#[tokio::test]
+async fn a_boolean_question_gets_system_one_s_verdict_and_the_llm_s_reasons() {
+    let chat = Arc::new(ScriptedChat::replying([verdict_reply(false)]));
+    let kev = FakeKev {
+        category: "boolean",
+        certainty: 0.9,
+        yes: 0.2,
+    };
+
+    let report = ask_kev(kev, &chat, "{}").await;
 
     let Outcome::Answered(answer) = &report.outcome else {
         panic!("expected an answer, got {:?}", report.outcome);
     };
     assert_eq!(report.category, Some(CategoryKind::Boolean));
-    assert_eq!(answer.verdict, None);
-    let classify = &report.trace.entries()[0];
     assert!(matches!(
-        classify.outcome,
-        StepOutcome::Passed { score: Some(score), .. } if score.0 == 0.9
+        answer.verdict,
+        Some(Verdict::Boolean { yes: false, confidence }) if (confidence.0 - 0.8).abs() < 1e-6
     ));
+    assert_eq!(answer.citations.len(), 1);
+    let names: Vec<_> = steps(&report).into_iter().map(|(step, _)| step).collect();
     assert_eq!(
-        classify.model.as_ref().map(|m| m.id.as_str()),
-        Some("fake-system-one")
+        names,
+        [
+            "classify", "retrieve", "rerank", "answer", "explain", "verify"
+        ]
     );
+    let request = &chat.requests()[0];
+    assert!(
+        request.user.ends_with("<verdict>no</verdict>"),
+        "{}",
+        request.user
+    );
+    assert!(
+        request.json_schema.as_ref().unwrap()["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("contradicts_verdict"))
+    );
+}
+
+#[tokio::test]
+async fn sources_that_contradict_the_verdict_decline_the_run() {
+    let chat = Arc::new(ScriptedChat::replying([verdict_reply(true)]));
+    let kev = FakeKev {
+        category: "boolean",
+        certainty: 0.9,
+        yes: 0.9,
+    };
+
+    let report = ask_kev(kev, &chat, "{}").await;
+
+    assert!(matches!(
+        &report.outcome,
+        Outcome::Declined { at, reason: DeclineReason::ContradictsVerdict, sources, .. }
+            if at == "explain" && !sources.is_empty()
+    ));
+    let TraceRecord::Explain(explain) = record(&report, "explain") else {
+        panic!("expected the explain record");
+    };
+    assert!(explain.contradicts_verdict);
+}
+
+#[tokio::test]
+async fn an_unsure_verdict_declines_at_the_configured_threshold() {
+    let chat = Arc::new(ScriptedChat::replying([verdict_reply(false)]));
+    let kev = FakeKev {
+        category: "boolean",
+        certainty: 0.9,
+        yes: 0.6,
+    };
+
+    let report = ask_kev(
+        kev,
+        &chat,
+        r#"{"per_category": {"boolean": {"answer": 0.7}}}"#,
+    )
+    .await;
+
+    assert!(matches!(
+        &report.outcome,
+        Outcome::Declined { at, reason: DeclineReason::LowConfidence, score: Some(score), threshold: Some(threshold), .. }
+            if at == "answer" && (score.0 - 0.6).abs() < 1e-6 && threshold.0 == 0.7
+    ));
+    assert!(chat.requests().is_empty());
+}
+
+#[tokio::test]
+async fn an_unsure_classification_falls_back_to_the_open_path() {
+    let agr = agr_users();
+    let chat = Arc::new(ScriptedChat::replying([reply(json!([
+        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
+    ]))]));
+    let kev = FakeKev {
+        category: "boolean",
+        certainty: 0.5,
+        yes: 0.9,
+    };
+
+    let report = ask_kev(kev, &chat, r#"{"classify": {"min_confidence": 0.6}}"#).await;
+
+    let Outcome::Answered(answer) = &report.outcome else {
+        panic!("expected an answer, got {:?}", report.outcome);
+    };
+    assert_eq!(report.category, Some(CategoryKind::Open));
+    assert_eq!(answer.verdict, None);
+    let TraceRecord::Classify(classify) = record(&report, "classify") else {
+        panic!("expected the classify record");
+    };
+    assert_eq!(classify.fallback_from, Some(CategoryKind::Boolean));
+    assert!(!steps(&report).iter().any(|(step, _)| *step == "answer"));
 }
 
 #[tokio::test]
@@ -377,7 +503,7 @@ async fn the_reranker_asks_system_one_about_each_match() {
             ModelRef::new("counting", "1")
         }
 
-        async fn decide(&self, request: DecisionRequest) -> anyhow::Result<DecisionResponse> {
+        async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
             self.0.fetch_add(1, Ordering::SeqCst);
             let answer = match request.questions.keys().next().map(String::as_str) {
                 Some("category") => DecisionAnswer::Choice {
@@ -400,8 +526,7 @@ async fn the_reranker_asks_system_one_about_each_match() {
     ]))]));
     let system_one = Arc::new(Counting::default());
     let report = answerer(corpus(), &chat)
-        .with_classifier(system_one.clone())
-        .with_reranker(system_one.clone())
+        .with_system_one(system_one.clone())
         .answer(Question::new(QUESTION))
         .await;
 

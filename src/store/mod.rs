@@ -23,7 +23,7 @@ pub struct DbArgs {
 }
 
 /// Connects and applies pending migrations.
-pub async fn connect(args: &DbArgs) -> anyhow::Result<PgPool> {
+pub async fn connect(args: &DbArgs) -> eros::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(&args.database_url)
@@ -42,7 +42,7 @@ pub struct StoredRun {
 /// Every run is persisted: answered, declined, and failed.
 #[async_trait]
 pub trait RunStore: Send + Sync {
-    async fn save(&self, user: &UserId, report: &RunReport) -> anyhow::Result<()>;
+    async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()>;
 
-    async fn get(&self, id: RunId) -> anyhow::Result<Option<StoredRun>>;
+    async fn get(&self, id: RunId) -> eros::Result<Option<StoredRun>>;
 }

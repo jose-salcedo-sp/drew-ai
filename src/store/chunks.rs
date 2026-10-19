@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, bail, ensure};
+use eros::{Context, bail, ensure};
 use pgvector::Vector;
 use sqlx::PgPool;
 
@@ -42,7 +42,7 @@ impl ChunkStore {
         &self,
         document: &Document,
         embedder: &dyn Embedder,
-    ) -> anyhow::Result<Stored> {
+    ) -> eros::Result<Stored> {
         let document_id = document.id();
         let model = embedder.model();
 
@@ -225,7 +225,7 @@ impl ChunkStore {
     }
 
     /// Distinct embedding models among current chunks.
-    pub async fn current_embedding_models(&self) -> anyhow::Result<Vec<ModelRef>> {
+    pub async fn current_embedding_models(&self) -> eros::Result<Vec<ModelRef>, (sqlx::Error,)> {
         Ok(sqlx::query_as::<_, (String, String)>(
             "SELECT DISTINCT embedding_model, embedding_model_version FROM chunks
              WHERE superseded_at IS NULL ORDER BY 1, 2",
@@ -238,7 +238,10 @@ impl ChunkStore {
     }
 
     /// Supersedes every current chunk embedded with a model other than `model`. Returns how many.
-    pub async fn supersede_other_models(&self, model: &ModelRef) -> anyhow::Result<u64> {
+    pub async fn supersede_other_models(
+        &self,
+        model: &ModelRef,
+    ) -> eros::Result<u64, (sqlx::Error,)> {
         Ok(sqlx::query(
             "UPDATE chunks SET superseded_at = now()
              WHERE superseded_at IS NULL
@@ -256,7 +259,7 @@ impl ChunkStore {
         &self,
         source: SourceKind,
         present: &[DocumentId],
-    ) -> anyhow::Result<u64> {
+    ) -> eros::Result<u64, (sqlx::Error,)> {
         let ids: Vec<&str> = present.iter().map(|d| d.0.as_str()).collect();
         Ok(sqlx::query(
             "UPDATE chunks SET superseded_at = now()

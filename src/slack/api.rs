@@ -8,16 +8,16 @@ const SLACK_API: &str = "https://slack.com/api/";
 
 #[async_trait]
 pub trait SlackApi: Send + Sync {
-    async fn open_connection(&self) -> anyhow::Result<String>;
+    async fn open_connection(&self) -> eros::Result<String>;
 
     async fn post_message(
         &self,
         channel: &str,
         thread_ts: Option<&str>,
         text: &str,
-    ) -> anyhow::Result<String>;
+    ) -> eros::Result<String>;
 
-    async fn update_message(&self, channel: &str, ts: &str, text: &str) -> anyhow::Result<()>;
+    async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()>;
 }
 
 pub struct SlackClient {
@@ -44,7 +44,7 @@ struct ApiOk {
 
 #[async_trait]
 impl SlackApi for SlackClient {
-    async fn open_connection(&self) -> anyhow::Result<String> {
+    async fn open_connection(&self) -> eros::Result<String> {
         #[derive(Deserialize)]
         struct Open {
             #[serde(flatten)]
@@ -60,13 +60,13 @@ impl SlackApi for SlackClient {
             .json()
             .await?;
         if !body.base.ok {
-            anyhow::bail!(
+            eros::bail!(
                 "apps.connections.open: {}",
                 body.base.error.unwrap_or_else(|| "unknown".into())
             );
         }
         body.url
-            .ok_or_else(|| anyhow::anyhow!("apps.connections.open missing url"))
+            .ok_or_else(|| eros::error!("apps.connections.open missing url"))
     }
 
     async fn post_message(
@@ -74,7 +74,7 @@ impl SlackApi for SlackClient {
         channel: &str,
         thread_ts: Option<&str>,
         text: &str,
-    ) -> anyhow::Result<String> {
+    ) -> eros::Result<String> {
         #[derive(Deserialize)]
         struct Posted {
             #[serde(flatten)]
@@ -95,16 +95,16 @@ impl SlackApi for SlackClient {
         let status = response.status();
         let body: Posted = response.json().await?;
         if status != StatusCode::OK || !body.base.ok {
-            anyhow::bail!(
+            eros::bail!(
                 "chat.postMessage: {}",
                 body.base.error.unwrap_or_else(|| status.to_string())
             );
         }
         body.ts
-            .ok_or_else(|| anyhow::anyhow!("chat.postMessage missing ts"))
+            .ok_or_else(|| eros::error!("chat.postMessage missing ts"))
     }
 
-    async fn update_message(&self, channel: &str, ts: &str, text: &str) -> anyhow::Result<()> {
+    async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()> {
         #[derive(Deserialize)]
         struct Updated {
             #[serde(flatten)]
@@ -121,7 +121,7 @@ impl SlackApi for SlackClient {
         let status = response.status();
         let body: Updated = response.json().await?;
         if status != StatusCode::OK || !body.base.ok {
-            anyhow::bail!(
+            eros::bail!(
                 "chat.update: {}",
                 body.base.error.unwrap_or_else(|| status.to_string())
             );

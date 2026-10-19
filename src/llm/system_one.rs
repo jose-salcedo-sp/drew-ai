@@ -4,8 +4,8 @@
 
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 
-use anyhow::{Context, ensure};
 use async_trait::async_trait;
+use eros::ensure;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 use super::ModelRef;
@@ -91,7 +91,7 @@ pub enum DecisionAnswer {
 pub trait SystemOne: Send + Sync {
     fn model(&self) -> ModelRef;
 
-    async fn decide(&self, request: DecisionRequest) -> anyhow::Result<DecisionResponse>;
+    async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse>;
 }
 
 pub struct HttpSystemOne {
@@ -109,7 +109,7 @@ impl HttpSystemOne {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
-                .expect("reqwest client builds"),
+                .expect("a client with only a timeout set always builds"),
             url: format!("{base}/v1/systemone"),
             model: args.system_one_model.clone(),
             key: args.system_one_key.clone(),
@@ -123,36 +123,38 @@ impl SystemOne for HttpSystemOne {
         ModelRef::new(&self.model, "system-one-v1")
     }
 
-    async fn decide(&self, mut request: DecisionRequest) -> anyhow::Result<DecisionResponse> {
-        request.model.clone_from(&self.model);
+    async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
+        self.post(request).await
+    }
+}
+
+impl HttpSystemOne {
+    #[eros::context("POST {}", self.url)]
+    async fn post(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
+        let request = DecisionRequest {
+            model: self.model.clone(),
+            ..request
+        };
         let mut post = self.client.post(&self.url).json(&request);
         if let Some(key) = &self.key {
             post = post.bearer_auth(key);
         }
-        let response = post
-            .send()
-            .await
-            .with_context(|| format!("POST {}", self.url))?;
+        let response = post.send().await?;
         let status = response.status();
         let text = response.text().await?;
-        ensure!(
-            status.is_success(),
-            "POST {} returned {status}: {text}",
-            self.url
-        );
-        serde_json::from_str(&text)
-            .with_context(|| format!("parsing the response from {}", self.url))
+        ensure!(status.is_success(), "returned {status}: {text}");
+        Ok(serde_json::from_str(&text)?)
     }
 }
 
 /// Returns queued responses in order and records every request it received.
 pub struct ScriptedSystemOne {
-    responses: Mutex<Vec<anyhow::Result<DecisionResponse>>>,
+    responses: Mutex<Vec<eros::Result<DecisionResponse>>>,
     requests: Mutex<Vec<DecisionRequest>>,
 }
 
 impl ScriptedSystemOne {
-    pub fn new(responses: impl IntoIterator<Item = anyhow::Result<DecisionResponse>>) -> Self {
+    pub fn new(responses: impl IntoIterator<Item = eros::Result<DecisionResponse>>) -> Self {
         let mut responses: Vec<_> = responses.into_iter().collect();
         responses.reverse();
         Self {
@@ -162,7 +164,10 @@ impl ScriptedSystemOne {
     }
 
     pub fn requests(&self) -> Vec<DecisionRequest> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .clone()
     }
 }
 
@@ -172,13 +177,16 @@ impl SystemOne for ScriptedSystemOne {
         ModelRef::new("fake-system-one", "1")
     }
 
-    async fn decide(&self, request: DecisionRequest) -> anyhow::Result<DecisionResponse> {
-        self.requests.lock().unwrap().push(request);
+    async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .push(request);
         self.responses
             .lock()
-            .unwrap()
+            .expect("lock poisoned: a test thread panicked while holding it")
             .pop()
-            .unwrap_or_else(|| Err(anyhow::anyhow!("ScriptedSystemOne has no responses left")))
+            .unwrap_or_else(|| Err(eros::error!("ScriptedSystemOne has no responses left")))
     }
 }
 

@@ -19,7 +19,7 @@ use self::{
 };
 
 /// An OpenAI-compatible server when `--embed-url` is set, Bedrock otherwise.
-pub async fn embedder(args: &EmbedArgs) -> anyhow::Result<Arc<dyn Embedder>> {
+pub async fn embedder(args: &EmbedArgs) -> eros::Result<Arc<dyn Embedder>> {
     Ok(match &args.embed_url {
         Some(url) => Arc::new(OpenAiEmbedder::new(url, &args.embed_model)),
         None => Arc::new(BedrockEmbedder::from_args(args).await?),
@@ -63,8 +63,7 @@ pub trait Embedder: Send + Sync {
     fn model(&self) -> ModelRef;
 
     /// One vector of `EMBEDDING_DIM` per input, in input order.
-    async fn embed(&self, texts: &[String], purpose: EmbedPurpose)
-    -> anyhow::Result<Vec<Vec<f32>>>;
+    async fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -88,5 +87,5 @@ pub struct ChatResponse {
 pub trait ChatModel: Send + Sync {
     fn model(&self) -> ModelRef;
 
-    async fn complete(&self, request: ChatRequest) -> anyhow::Result<ChatResponse>;
+    async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse>;
 }

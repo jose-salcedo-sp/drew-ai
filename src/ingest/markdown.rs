@@ -37,6 +37,7 @@ pub struct MarkdownArgs {
     pub skip: Vec<PathBuf>,
 }
 
+#[derive(Clone)]
 pub struct Connector {
     root: PathBuf,
     base_url: Option<String>,
@@ -45,17 +46,17 @@ pub struct Connector {
 }
 
 impl Connector {
-    pub fn from_args(args: &MarkdownArgs) -> anyhow::Result<Option<Self>> {
+    pub fn from_args(args: &MarkdownArgs) -> eros::Result<Option<Self>> {
         let Some(root) = args.docs.clone() else {
             return Ok(None);
         };
-        anyhow::ensure!(
+        eros::ensure!(
             root.is_dir(),
             "docs path {} is not a directory",
             root.display()
         );
         if let Some(base) = &args.docs_base_url {
-            Url::parse(base).map_err(|e| anyhow::anyhow!("invalid docs base URL: {e}"))?;
+            Url::parse(base).map_err(|e| eros::error!("invalid docs base URL: {e}"))?;
         }
         let listed = |paths: &[PathBuf]| -> Vec<PathBuf> {
             paths
@@ -75,7 +76,7 @@ impl Connector {
             .chain(listed(&args.skip).into_iter().map(|p| (p, None)))
             .collect();
         for (path, _) in &layers {
-            anyhow::ensure!(
+            eros::ensure!(
                 path.is_relative()
                     && path
                         .components()
@@ -83,13 +84,13 @@ impl Connector {
                 "corpus path {} must be relative to the docs root, without `..`",
                 path.display()
             );
-            anyhow::ensure!(
+            eros::ensure!(
                 root.join(path).exists(),
                 "corpus path {} does not exist under {}",
                 path.display(),
                 root.display()
             );
-            anyhow::ensure!(
+            eros::ensure!(
                 layers.iter().filter(|(p, _)| p == path).count() == 1,
                 "corpus path {} is listed more than once",
                 path.display()
@@ -111,10 +112,10 @@ impl Connector {
             .and_then(|(_, authoritative)| *authoritative)
     }
 
-    fn document(&self, path: &Path, authoritative: bool) -> anyhow::Result<Document> {
+    fn document(&self, path: &Path, authoritative: bool) -> eros::Result<Document> {
         let rel = path
             .strip_prefix(&self.root)
-            .map_err(|_| anyhow::anyhow!("path outside docs root"))?;
+            .map_err(|_| eros::error!("path outside docs root"))?;
         let external_id = rel
             .components()
             .map(|c| c.as_os_str().to_string_lossy())
@@ -147,7 +148,7 @@ impl Connector {
         }
     }
 
-    fn collect_md_files(&self) -> anyhow::Result<Vec<PathBuf>> {
+    fn collect_md_files(&self) -> eros::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         collect_md_recursive(&self.root, &mut files)?;
         files.sort();
@@ -155,7 +156,7 @@ impl Connector {
     }
 }
 
-fn collect_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+fn collect_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> eros::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -172,7 +173,7 @@ fn collect_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()
     Ok(())
 }
 
-fn file_mtime(path: &Path) -> anyhow::Result<DateTime<Utc>> {
+fn file_mtime(path: &Path) -> eros::Result<DateTime<Utc>> {
     let meta = fs::metadata(path)?;
     let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     Ok(DateTime::<Utc>::from(modified))
@@ -220,11 +221,7 @@ struct Section {
 }
 
 /// One chunk per non-empty heading section; headings inside fenced code blocks are ignored.
-pub fn chunks(
-    file_url: &str,
-    content: &str,
-    authoritative: bool,
-) -> anyhow::Result<Vec<ChunkDraft>> {
+pub fn chunks(file_url: &str, content: &str, authoritative: bool) -> eros::Result<Vec<ChunkDraft>> {
     let body = strip_front_matter(content);
     let sections = sections(body)?;
     let mut used = HashSet::from([INTRO.to_owned()]);
@@ -274,7 +271,7 @@ fn strip_front_matter(content: &str) -> &str {
     }
 }
 
-fn sections(content: &str) -> anyhow::Result<Vec<Section>> {
+fn sections(content: &str) -> eros::Result<Vec<Section>> {
     let mut out = Vec::new();
     let mut path: Vec<String> = Vec::new();
     let mut current_text = String::new();
@@ -376,7 +373,16 @@ impl Source for Connector {
         SourceKind::Markdown
     }
 
-    async fn fetch_all(&self) -> anyhow::Result<Vec<Document>> {
+    /// The snapshot is read with blocking file I/O, so it runs on the runtime's blocking pool.
+    async fn fetch_all(&self) -> eros::Result<Vec<Document>> {
+        let connector = self.clone();
+        tokio::task::spawn_blocking(move || connector.read_snapshot()).await?
+    }
+}
+
+impl Connector {
+    #[eros::context("reading the markdown snapshot under {}", self.root.display())]
+    fn read_snapshot(&self) -> eros::Result<Vec<Document>> {
         let mut documents = Vec::new();
         for path in self.collect_md_files()? {
             let rel = path.strip_prefix(&self.root)?;

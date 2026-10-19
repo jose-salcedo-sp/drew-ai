@@ -6,12 +6,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::PipelineConfig,
     domain::{CategoryKind, ChunkId, ChunkRef, Provenance},
     pipeline::{
+        answerer::Models,
         report::{Answer, Answerer, Outcome, RunReport, Verdict},
         trace::{ClassifyRecord, RerankRecord, RetrieveRecord, TraceRecord},
     },
@@ -32,8 +35,24 @@ pub const CATEGORIES: [CategoryKind; 4] = [
 /// The `drew eval run` output file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Results {
+    /// What the runs ran with. `None` in files written before it was recorded, and for scripted answerers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<RunSetup>,
     pub metrics: MetricsReport,
     pub runs: Vec<EvalRun>,
+}
+
+/// The configuration and models behind a results file, so two files can be compared knowing what changed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RunSetup {
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub golden: String,
+    /// `git describe --always --dirty` of the working tree, when it is a git checkout.
+    pub git: Option<String>,
+    pub config: PipelineConfig,
+    pub models: Models,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,6 +114,7 @@ pub async fn evaluate(
 impl Results {
     pub fn new(runs: Vec<EvalRun>) -> Self {
         Self {
+            setup: None,
             metrics: MetricsReport::of(&runs),
             runs,
         }

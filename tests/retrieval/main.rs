@@ -419,7 +419,7 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
         .await;
     let error = retriever.retrieve("AGR_USERS").await.unwrap_err();
     let mismatch = error
-        .downcast_ref::<EmbeddingModelMismatch>()
+        .downcast_inner_ref::<EmbeddingModelMismatch>()
         .expect("a model mismatch");
     assert_eq!(mismatch.expected, HashEmbedder.model());
     assert_eq!(mismatch.found, [titan, HashEmbedder.model()]);

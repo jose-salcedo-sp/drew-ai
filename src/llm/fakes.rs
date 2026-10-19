@@ -18,11 +18,7 @@ impl Embedder for HashEmbedder {
         ModelRef::new("fake-hash-embedder", "1")
     }
 
-    async fn embed(
-        &self,
-        texts: &[String],
-        _purpose: EmbedPurpose,
-    ) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String], _purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|text| hash_embed(text)).collect())
     }
 }
@@ -47,12 +43,12 @@ fn hash_embed(text: &str) -> Vec<f32> {
 /// Returns queued responses in order and records every request it received.
 pub struct ScriptedChat {
     model: ModelRef,
-    responses: Mutex<VecDeque<anyhow::Result<ChatResponse>>>,
+    responses: Mutex<VecDeque<eros::Result<ChatResponse>>>,
     requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl ScriptedChat {
-    pub fn new(responses: impl IntoIterator<Item = anyhow::Result<ChatResponse>>) -> Self {
+    pub fn new(responses: impl IntoIterator<Item = eros::Result<ChatResponse>>) -> Self {
         Self {
             model: ModelRef::new("fake-scripted-chat", "1"),
             responses: Mutex::new(responses.into_iter().collect()),
@@ -70,7 +66,10 @@ impl ScriptedChat {
     }
 
     pub fn requests(&self) -> Vec<ChatRequest> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .clone()
     }
 }
 
@@ -80,12 +79,15 @@ impl ChatModel for ScriptedChat {
         self.model.clone()
     }
 
-    async fn complete(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        self.requests.lock().unwrap().push(request);
+    async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse> {
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .push(request);
         self.responses
             .lock()
-            .unwrap()
+            .expect("lock poisoned: a test thread panicked while holding it")
             .pop_front()
-            .unwrap_or_else(|| Err(anyhow::anyhow!("ScriptedChat has no responses left")))
+            .unwrap_or_else(|| Err(eros::error!("ScriptedChat has no responses left")))
     }
 }

@@ -2,7 +2,7 @@
 
 Drew AI answers questions about SAP and ARM internals using Drew Steinfatt's pre-audited markdown documentation as the knowledge source. A small, fast "System One" model answers the **what** (yes/no, a choice, or a ranking); an LLM answers the **why**. Every answer carries provenance. v1 is a developer-facing Slack bot plus an OpenAI-compatible HTTP API.
 
-Status: design agreed; crate foundation in place (shared types, pipeline machinery, schema, module boundaries with fakes). Confidence thresholds are intentionally undecided; they are set by the evaluation harness.
+Status: design agreed; crate foundation in place (shared types, pipeline machinery, schema, module boundaries with fakes). Confidence thresholds live in `config/drew.json` with starting values; the evaluation harness tunes them.
 
 ## 1. v1 scope
 
@@ -262,7 +262,8 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 - **Golden set**: about 50 questions per category, mined from Drew's Q&A threads, held out of the corpus, verified by Drew.
 - **`drew eval`** reports per step: classification accuracy, retrieval recall@50, rerank hit@5, answer precision, decline rate, citation validity.
 - **CI**: runs on every change to prompts, models, chunking, or thresholds; a regression in any metric fails the build.
-- **Threshold tuning**: re-applies candidate thresholds to persisted runs from their recorded scores, without calling any model. Full replay is out of scope for v1.
+- **Threshold tuning**: re-applies candidate thresholds to persisted runs from their recorded scores, without calling any model. Full replay is out of scope for v1. A candidate's `thresholds` and `per_category` have the same shape as those in `config/drew.json`, so a tuned candidate is pasted in as is.
+- **Configuration**: every tunable (retrieval candidates, `classify.min_confidence`, rerank `top_k`, `candidates` and `evidence_rank_penalty`, step thresholds) is in one JSON file, `config/drew.json` or `DREW_CONFIG`. Unknown keys are rejected. `drew eval run` prints it with the models in use and records both, with the git revision, in the results file.
 - **Launch gate** (opening beyond the 4 users): answered precision ≥ 95% and decline rate ≤ ~40%. Until then v1 is the shadow phase, with Drew reviewing.
 - **Feedback loop**: declined and thumbs-down answers go to Drew's review queue. His corrections are ingested as authoritative chunks, and the question joins the golden set.
 
@@ -272,8 +273,8 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 2. Hybrid retrieval, measured by recall@50.
 3. `open` end to end as the baseline: `Retrieve` → `Explain` → `Verify`, with every question treated as `open` and `Rerank` stubbed as top-5 by fused score.
 4. `Classify`: one System One choice question over the four categories, scored by its calibrated probability. Until `Answer` exists, `boolean`, `choice`, and `ranking` questions are answered through the `open` path, and the run keeps the classified category.
-5. `Rerank`: one System One yes/no question per match ("does this text help answer the question?") over the top 25 matches by fused score; the probability of yes ranks them and scores the step. Neighbouring sections added by retrieval are context for their match, not candidates of their own.
-6. `Answer` with thresholds and declines.
+5. `Rerank`: one System One yes/no question per match ("does this text help answer the question?") over the top 25 matches by fused score. Matches are ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes rank, with evidence (non-authoritative) matches ranked 10 places lower in both; the best kept probability scores the step. Ordering by probability alone scored hit@5 36% on the DaaS golden set against 53% for retrieval order, because Kev's probabilities sit close together. Neighbouring sections added by retrieval are context for their match, not candidates of their own.
+6. `Answer` with thresholds and declines. `Answer<Boolean>` is built: one System One yes/no question over the reranked sources; the probability of yes is the verdict, `max(p, 1 - p)` scores the step against `answer`'s threshold, and `Explain<Boolean>` declines the run (`ContradictsVerdict`) when the sources contradict the verdict. A `boolean`, `choice` or `ranking` classification below `classify.min_confidence` falls back to `open`. `choice` and `ranking` still take the `open` path.
 7. Launch-gate evaluation.
 
 ## 8. Deferred: security phase

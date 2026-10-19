@@ -1,3 +1,4 @@
+pub mod config;
 pub mod domain;
 pub mod eval;
 pub mod ingest;

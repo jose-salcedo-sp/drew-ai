@@ -18,6 +18,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin drew
 COPY --from=build /usr/local/bin/drew /usr/local/bin/drew
+COPY config/drew.json /etc/drew/drew.json
+ENV DREW_CONFIG=/etc/drew/drew.json
 # Numeric, so Kubernetes `runAsNonRoot` can verify it.
 USER 10001
 ENV DREW_BIND=0.0.0.0:8080

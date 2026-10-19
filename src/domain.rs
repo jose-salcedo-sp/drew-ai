@@ -140,7 +140,8 @@ impl ChunkVersion {
             labels: &document.labels,
             embedding_model,
         };
-        let bytes = serde_json::to_vec(&content).expect("chunk content serializes");
+        let bytes = serde_json::to_vec(&content)
+            .expect("chunk content is plain data, which always serializes");
         Self(hex::encode(Sha256::digest(bytes)))
     }
 }

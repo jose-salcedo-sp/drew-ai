@@ -33,9 +33,9 @@ impl Bar {
         let bar = ProgressBar::new(total as u64);
         bar.set_style(
             ProgressStyle::with_template(
-                "{spinner:.cyan} [{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} eta {eta} {msg}",
+                "{spinner:.cyan} [{elapsed_precise}] [{bar:30.cyan/blue}] {pos}/{len} {msg}",
             )
-            .expect("progress template is valid")
+            .expect("the progress template is a valid constant")
             .progress_chars("=> "),
         );
         bar.enable_steady_tick(Duration::from_millis(120));
@@ -68,7 +68,10 @@ impl Bar {
 
 impl Progress for Bar {
     fn started(&self, golden: &GoldenQuestion) {
-        let mut running = self.running.lock().expect("progress lock");
+        let mut running = self
+            .running
+            .lock()
+            .expect("progress lock poisoned: a reporter panicked while holding it");
         running.push(golden.id.clone());
         self.show_running(&running);
     }
@@ -78,7 +81,10 @@ impl Progress for Bar {
         let line = line(run, elapsed, position, self.total);
         self.bar.suspend(|| println!("{line}"));
         self.bar.inc(1);
-        let mut running = self.running.lock().expect("progress lock");
+        let mut running = self
+            .running
+            .lock()
+            .expect("progress lock poisoned: a reporter panicked while holding it");
         running.retain(|id| *id != run.golden.id);
         self.show_running(&running);
     }
@@ -130,6 +136,7 @@ fn decline(reason: &DeclineReason) -> String {
         DeclineReason::InvalidModelOutput(detail) => format!("invalid model output: {detail}"),
         DeclineReason::NoSources => "no sources".into(),
         DeclineReason::Unverified(detail) => format!("unverified: {detail}"),
+        DeclineReason::ContradictsVerdict => "the sources contradict the verdict".into(),
     }
 }
 

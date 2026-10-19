@@ -1,0 +1,23 @@
+{
+  "retrieval": {
+    "full_text_candidates": 50,
+    "vector_candidates": 50,
+    "rrf_k": 60.0,
+    "fused_limit": 50,
+    "max_chunks_per_document": 3
+  },
+  "classify": {
+    "min_confidence": 0.6
+  },
+  "rerank": {
+    "top_k": 5,
+    "candidates": 25,
+    "evidence_rank_penalty": 10
+  },
+  "thresholds": {},
+  "per_category": {
+    "boolean": {
+      "answer": 0.7
+    }
+  }
+}

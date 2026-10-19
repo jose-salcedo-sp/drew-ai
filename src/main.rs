@@ -1,3 +1,5 @@
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
 use drew::{eval, ingest, server};
 use tracing_subscriber::EnvFilter;
@@ -22,16 +24,28 @@ enum Command {
     Eval(eval::Args),
 }
 
+/// Reports a failure once, with its causes and context; set `RUST_BACKTRACE=1` for the backtrace too.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    match Cli::parse().command {
+    let result = match Cli::parse().command {
         Command::Serve(args) => server::run(args).await,
         Command::Ingest(args) => ingest::run(args).await,
         Command::Eval(args) => eval::run(args).await,
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if std::env::var_os("RUST_BACKTRACE").is_some() => {
+            eprintln!("error: {error:?}");
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!("error: {error:#?}");
+            ExitCode::FAILURE
+        }
     }
 }
 

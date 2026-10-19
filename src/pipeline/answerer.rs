@@ -3,28 +3,29 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::{
-    domain::{CategoryKind, Chunk, Provenance, Question},
+    config::{ConfigArgs, PipelineConfig},
+    domain::{CategoryKind, Chunk, Provenance, Question, RunId, Score},
     llm::{
-        self, ChatModel,
+        self, ChatModel, ModelRef,
         bedrock_chat::ChatArgs,
         bedrock_embed::EmbedArgs,
         system_one::{HttpSystemOne, SystemOne, SystemOneArgs},
     },
-    retrieval::{
-        Retrieved, Retriever,
-        hybrid::{HybridConfig, HybridRetriever},
-    },
+    retrieval::{Retrieved, Retriever, hybrid::HybridRetriever},
 };
 
 use super::{
     Boolean, Category, Choice, Halt, Halted, Open, Pipeline, Ranking, Run, Seq, Unclassified,
-    report::{Answer, Answerer, Citation, Outcome, RunReport},
+    report::{Answer, Answerer, Citation, Outcome, RunReport, Verdict},
     steps::{
-        Candidates, Classify, Explain, OpenEnded, Rerank, Reranked, Retrieve, Verified, Verify,
+        Answer as AnswerStep, Candidates, Classify, Decisive, Explain, OpenEnded, Rerank, Reranked,
+        Retrieve, Verified, VerifiedVerdict, Verify,
     },
+    trace::Trace,
 };
 
 const EXCERPT_CHARS: usize = 200;
@@ -40,6 +41,8 @@ pub enum Classified {
 #[derive(Clone, Debug, clap::Args)]
 pub struct PipelineArgs {
     #[command(flatten)]
+    pub config: ConfigArgs,
+    #[command(flatten)]
     pub embed: EmbedArgs,
     #[command(flatten)]
     pub chat: ChatArgs,
@@ -47,67 +50,152 @@ pub struct PipelineArgs {
     pub system_one: SystemOneArgs,
 }
 
+/// The models a pipeline calls, recorded with every `drew eval` run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Models {
+    /// `None` when the retriever was built outside `from_args`.
+    pub embedding: Option<ModelRef>,
+    pub explain: ModelRef,
+    /// Classify, Rerank and Answer. `None`: every question is `open` and reranking keeps retrieval order.
+    pub system_one: Option<ModelRef>,
+}
+
 pub struct PipelineAnswerer {
+    config: PipelineConfig,
+    embedding: Option<ModelRef>,
+    explain: Arc<dyn ChatModel>,
+    system_one: Option<Arc<dyn SystemOne>>,
     classify: Classify,
     retrieve: Retrieve,
     rerank_open: Rerank<Open>,
+    rerank_boolean: Rerank<Boolean>,
     open: OpenEnded,
+    boolean: Decisive<Boolean>,
 }
 
 impl PipelineAnswerer {
-    /// Classifies every question as `open`; see `with_classifier`.
+    /// Classifies every question as `open`; see `with_system_one`.
     pub fn new(retriever: Arc<dyn Retriever>, explain: Arc<dyn ChatModel>) -> Self {
+        Self::build(
+            PipelineConfig::default(),
+            None,
+            Retrieve::new(retriever),
+            explain,
+            None,
+        )
+    }
+
+    fn build(
+        config: PipelineConfig,
+        embedding: Option<ModelRef>,
+        retrieve: Retrieve,
+        explain: Arc<dyn ChatModel>,
+        system_one: Option<Arc<dyn SystemOne>>,
+    ) -> Self {
+        let threshold = |category, step| config.threshold(category, step);
         Self {
-            classify: Classify::new(None),
-            retrieve: Retrieve::new(retriever),
-            rerank_open: Rerank::default(),
-            open: Seq(Explain::new(explain), Verify::new()),
+            classify: Classify::new(system_one.clone())
+                .with_min_confidence(config.classify.min_confidence.map(Score)),
+            retrieve,
+            rerank_open: Rerank::from_config(
+                &config.rerank,
+                threshold(CategoryKind::Open, "rerank"),
+                system_one.clone(),
+            ),
+            rerank_boolean: Rerank::from_config(
+                &config.rerank,
+                threshold(CategoryKind::Boolean, "rerank"),
+                system_one.clone(),
+            ),
+            open: Seq(Explain::new(explain.clone()), Verify::new()),
+            boolean: Seq(
+                AnswerStep::new(
+                    system_one.clone(),
+                    threshold(CategoryKind::Boolean, "answer"),
+                ),
+                Seq(Explain::new(explain.clone()), Verify::new()),
+            ),
+            config,
+            embedding,
+            explain,
+            system_one,
         }
     }
 
-    pub fn with_classifier(self, system_one: Arc<dyn SystemOne>) -> Self {
-        Self {
-            classify: Classify::new(Some(system_one)),
-            ..self
+    /// Classify, Rerank and Answer on System One.
+    pub fn with_system_one(self, system_one: Arc<dyn SystemOne>) -> Self {
+        Self::build(
+            self.config,
+            self.embedding,
+            self.retrieve,
+            self.explain,
+            Some(system_one),
+        )
+    }
+
+    pub fn with_config(self, config: PipelineConfig) -> Self {
+        Self::build(
+            config,
+            self.embedding,
+            self.retrieve,
+            self.explain,
+            self.system_one,
+        )
+    }
+
+    pub fn config(&self) -> &PipelineConfig {
+        &self.config
+    }
+
+    pub fn models(&self) -> Models {
+        Models {
+            embedding: self.embedding.clone(),
+            explain: self.explain.model(),
+            system_one: self
+                .system_one
+                .as_ref()
+                .map(|system_one| system_one.model()),
         }
     }
 
-    pub fn with_reranker(self, system_one: Arc<dyn SystemOne>) -> Self {
-        let defaults = Rerank::<Open>::default();
-        Self {
-            rerank_open: Rerank::new(defaults.top_k(), defaults.candidates(), Some(system_one)),
-            ..self
-        }
-    }
-
-    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Rerank` on System One
-    /// when configured.
-    pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> anyhow::Result<Self> {
+    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify`, `Rerank` and `Answer`
+    /// on System One when configured. Every tunable comes from the pipeline config file.
+    pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> eros::Result<Self> {
+        let config = args.config.load()?;
         let embedder = llm::embedder(&args.embed).await?;
-        let retriever = HybridRetriever::new(pool, embedder, HybridConfig::default());
+        let embedding = Some(embedder.model());
+        let retriever = HybridRetriever::new(pool, embedder, config.retrieval.clone());
         let explain = llm::explain_model(&args.chat).await;
-        let answerer = Self::new(Arc::new(retriever), explain);
-        Ok(match HttpSystemOne::from_args(&args.system_one) {
-            Some(system_one) => {
-                let system_one: Arc<dyn SystemOne> = Arc::new(system_one);
-                answerer
-                    .with_classifier(system_one.clone())
-                    .with_reranker(system_one)
-            }
-            None => answerer,
-        })
+        let system_one = HttpSystemOne::from_args(&args.system_one)
+            .map(|system_one| Arc::new(system_one) as Arc<dyn SystemOne>);
+        Ok(Self::build(
+            config,
+            embedding,
+            Retrieve::new(Arc::new(retriever)),
+            explain,
+            system_one,
+        ))
     }
 
-    /// Until `Answer` lands (milestone 6), `boolean`, `choice`, and `ranking` questions take the open path; the
-    /// returned category is still the one `Classify` chose.
+    /// `choice` and `ranking` take the open path until their `Answer` steps exist; the returned category is still
+    /// the one `Classify` chose.
     async fn classify(&self, question: Question) -> Result<(CategoryKind, Classified), Halted> {
         let run = Run::new(question)
             .both("classify_retrieve", &self.classify, &self.retrieve)
             .await?;
         let category = run.state().0;
         let run: Run<Unclassified, Candidates> = run.map(|(_, candidates)| candidates);
-        let run = run.classified::<Open>().then(&self.rerank_open).await?;
-        Ok((category, Classified::Open(run)))
+        let classified = match category {
+            CategoryKind::Boolean => Classified::Boolean(
+                run.classified::<Boolean>()
+                    .then(&self.rerank_boolean)
+                    .await?,
+            ),
+            CategoryKind::Choice | CategoryKind::Ranking | CategoryKind::Open => {
+                Classified::Open(run.classified::<Open>().then(&self.rerank_open).await?)
+            }
+        };
+        Ok((category, classified))
     }
 }
 
@@ -118,15 +206,38 @@ impl Answerer for PipelineAnswerer {
             Ok(classified) => classified,
             Err(halted) => return halted_report(halted, &[]),
         };
+        // `Halted` carries no state, so a later decline lists the sources kept here.
         let mut report = match classified {
-            Classified::Boolean(run) => halted_report(answer_not_implemented(run), &[]),
+            Classified::Boolean(run) => {
+                let sources = run.state().0.clone();
+                match self.boolean.drive(run).await {
+                    Ok(run) => {
+                        let (id, question, decided, trace) = run.into_parts();
+                        let VerifiedVerdict {
+                            verified,
+                            yes,
+                            confidence,
+                        } = decided;
+                        answered_report(
+                            id,
+                            question,
+                            verified,
+                            trace,
+                            Some(Verdict::Boolean { yes, confidence }),
+                        )
+                    }
+                    Err(halted) => halted_report(halted, &sources),
+                }
+            }
             Classified::Choice(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Ranking(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Open(run) => {
-                // `Halted` carries no state, so a later decline lists the sources kept here.
                 let sources = run.state().0.clone();
                 match self.open.drive(run).await {
-                    Ok(run) => answered_report(run),
+                    Ok(run) => {
+                        let (id, question, verified, trace) = run.into_parts();
+                        answered_report(id, question, verified, trace, None)
+                    }
                     Err(halted) => halted_report(halted, &sources),
                 }
             }
@@ -150,8 +261,13 @@ fn answer_not_implemented<TCategory: Category>(run: Run<TCategory, Reranked>) ->
     }
 }
 
-fn answered_report(run: Run<Open, Verified>) -> RunReport {
-    let (id, question, Verified { answer, sources }, trace) = run.into_parts();
+fn answered_report(
+    id: RunId,
+    question: Question,
+    Verified { answer, sources }: Verified,
+    trace: Trace,
+    verdict: Option<Verdict>,
+) -> RunReport {
     let why = answer.into_claims();
     let mut cited = HashSet::new();
     let citations = why
@@ -168,9 +284,9 @@ fn answered_report(run: Run<Open, Verified>) -> RunReport {
     RunReport {
         id,
         question,
-        category: Open::KIND,
+        category: None,
         outcome: Outcome::Answered(Answer {
-            verdict: None,
+            verdict,
             why,
             citations,
         }),

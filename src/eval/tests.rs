@@ -78,6 +78,7 @@ fn classify(category: CategoryKind, score: f32) -> TraceEntry {
         Some(TraceRecord::Classify(ClassifyRecord {
             raw: None,
             category: Some(category),
+            fallback_from: None,
         })),
     )
 }
@@ -694,9 +695,13 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
         concurrency: 2,
     };
 
-    run_golden(Arc::new(Scripted::new(&runs)), args("first.json", None))
-        .await
-        .unwrap();
+    run_golden(
+        Arc::new(Scripted::new(&runs)),
+        args("first.json", None),
+        None,
+    )
+    .await
+    .unwrap();
     let first: Results = read_json(&dir.join("first.json")).unwrap();
     assert_eq!(first.runs.len(), 5);
     assert_eq!(first.runs[0].report, runs[0].1);
@@ -705,6 +710,7 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
     run_golden(
         Arc::new(Scripted::new(&runs)),
         args("second.json", Some(dir.join("first.json"))),
+        None,
     )
     .await
     .unwrap();
@@ -714,6 +720,7 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
     let error = run_golden(
         Arc::new(Scripted::new(&worse)),
         args("third.json", Some(dir.join("first.json"))),
+        None,
     )
     .await
     .unwrap_err();
@@ -740,6 +747,7 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
     run_golden(
         Arc::new(Scripted::new(&worse)),
         args("fourth.json", Some(dir.join("tolerant.json"))),
+        None,
     )
     .await
     .unwrap();
@@ -767,10 +775,11 @@ async fn golden_parse_errors_surface_through_the_run_command() {
             baseline: None,
             concurrency: 1,
         },
+        None,
     )
     .await
     .unwrap_err();
-    assert!(format!("{error:#}").contains("line 2: "), "{error:#}");
+    assert!(format!("{error:#?}").contains("line 2: "), "{error:#?}");
     fs::remove_dir_all(&dir).unwrap();
 }
 

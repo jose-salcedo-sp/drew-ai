@@ -52,7 +52,7 @@ fn roles_page() -> Document {
 
 /// Ingest, hybrid retrieval, the pipeline, the HTTP API, and the run store, with only the models faked.
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> anyhow::Result<()> {
+async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Result<()> {
     let sources: Vec<Box<dyn Source>> = vec![Box::new(StaticSource {
         kind: SourceKind::Markdown,
         documents: vec![roles_page()],

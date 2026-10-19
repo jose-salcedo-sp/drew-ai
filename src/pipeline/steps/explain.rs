@@ -4,16 +4,17 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    domain::{ChunkId, Question},
+    domain::{ChunkId, Question, Score},
     llm::{ChatModel, ChatRequest},
-    pipeline::{DeclineReason, Open, Scored, Step, StepError, trace::ExplainRecord},
+    pipeline::{Boolean, DeclineReason, Open, Scored, Step, StepError, trace::ExplainRecord},
     retrieval::Retrieved,
 };
 
-use super::Reranked;
+use super::{Decided, Reranked};
 
 /// Bump on any change to `SYSTEM`, `prompt`, or `schema`, so traces and eval can tell prompts apart.
 pub const PROMPT_VERSION: &str = "explain-open-v2";
+pub const BOOLEAN_PROMPT_VERSION: &str = "explain-boolean-v1";
 
 const MAX_TOKENS: u32 = 2048;
 
@@ -41,7 +42,10 @@ Rules:
 
 Respond only with JSON matching the provided schema."#;
 
-/// Writes the "why" from the reranked sources. Only `Explain<Open>` exists until `Answer` lands in milestone 6.
+/// Added to `SYSTEM` when System One has already decided a yes/no question.
+const VERDICT_RULES: &str = r#"A decision model has already answered this yes/no question; its verdict is inside <verdict>. Explain why the verdict holds, in claims that cite the sources. If the sources you would cite contradict the verdict, set contradicts_verdict to true and list the claims that show the contradiction. Never change the verdict yourself."#;
+
+/// Writes the "why" from the reranked sources: the whole answer for `open`, the reason for a decided verdict.
 pub struct Explain<TCategory> {
     chat: Arc<dyn ChatModel>,
     category: PhantomData<TCategory>,
@@ -54,12 +58,87 @@ impl<TCategory> Explain<TCategory> {
             category: PhantomData,
         }
     }
+
+    /// `verdict` is System One's yes or no, when it decided one.
+    async fn explain(
+        &self,
+        question: &Question,
+        sources: Reranked,
+        verdict: Option<bool>,
+    ) -> Result<Scored<Explained, ExplainRecord>, StepError> {
+        let prompt_version = if verdict.is_some() {
+            BOOLEAN_PROMPT_VERSION
+        } else {
+            PROMPT_VERSION
+        };
+        let (system, mut user) = match verdict {
+            Some(_) => (
+                format!("{SYSTEM}\n\n{VERDICT_RULES}"),
+                prompt(question, &sources.0),
+            ),
+            None => (SYSTEM.to_owned(), prompt(question, &sources.0)),
+        };
+        if let Some(yes) = verdict {
+            let _ = write!(
+                user,
+                "\n\n<verdict>{}</verdict>",
+                if yes { "yes" } else { "no" }
+            );
+        }
+        let request = ChatRequest {
+            system,
+            user,
+            max_tokens: MAX_TOKENS,
+            temperature: 0.0,
+            json_schema: Some(schema(verdict.is_some())),
+        };
+        let model = self.chat.model();
+        let response =
+            self.chat.complete(request).await.map_err(|error| {
+                StepError::from(error).with_model(model.clone(), prompt_version)
+            })?;
+        let decline = |reason, record: ExplainRecord| {
+            StepError::decline(reason)
+                .with_record(record)
+                .with_model(model.clone(), prompt_version)
+        };
+        let mut record = ExplainRecord {
+            raw: Some(response.text.clone()),
+            contradicts_verdict: false,
+        };
+        let raw: RawExplanation = serde_json::from_str(&response.text).map_err(|error| {
+            decline(
+                DeclineReason::InvalidModelOutput(error.to_string()),
+                record.clone(),
+            )
+        })?;
+        if verdict.is_some() && raw.contradicts_verdict {
+            record.contradicts_verdict = true;
+            return Err(decline(DeclineReason::ContradictsVerdict, record));
+        }
+        let explanation = convert(raw).map_err(|reason| decline(reason, record.clone()))?;
+        Ok(Scored::new(
+            Explained {
+                explanation,
+                sources,
+            },
+            record,
+        )
+        .with_model(model, prompt_version))
+    }
 }
 
 /// Output of `Explain`: the claims, not yet checked against the sources they cite.
 pub struct Explained {
     pub explanation: Explanation,
     pub sources: Reranked,
+}
+
+/// Output of `Explain<Boolean>`: the explanation and the verdict it explains.
+pub struct ExplainedVerdict {
+    pub explained: Explained,
+    pub yes: bool,
+    pub confidence: Score,
 }
 
 /// At least one claim. Claims may still lack citations or cite unknown chunks; `Verify` rejects those.
@@ -84,6 +163,9 @@ pub struct Claim {
 #[derive(Debug, Deserialize)]
 struct RawExplanation {
     claims: Vec<RawClaim>,
+    /// Only asked for when explaining a verdict.
+    #[serde(default)]
+    contradicts_verdict: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,41 +232,56 @@ impl Step for Explain<Open> {
         question: &Question,
         input: Reranked,
     ) -> Result<Scored<Explained, ExplainRecord>, StepError> {
-        let request = ChatRequest {
-            system: SYSTEM.to_owned(),
-            user: prompt(question, &input.0),
-            max_tokens: MAX_TOKENS,
-            temperature: 0.0,
-            json_schema: Some(schema()),
-        };
-        let model = self.chat.model();
-        let response =
-            self.chat.complete(request).await.map_err(|error| {
-                StepError::from(error).with_model(model.clone(), PROMPT_VERSION)
-            })?;
-        let record = ExplainRecord {
-            raw: Some(response.text.clone()),
-            contradicts_verdict: false,
-        };
-        let explanation = parse(&response.text).map_err(|reason| {
-            StepError::decline(reason)
-                .with_record(record.clone())
-                .with_model(model.clone(), PROMPT_VERSION)
-        })?;
-        Ok(Scored::new(
-            Explained {
-                explanation,
-                sources: input,
-            },
-            record,
-        )
-        .with_model(model, PROMPT_VERSION))
+        self.explain(question, input, None).await
     }
 }
 
+impl Step for Explain<Boolean> {
+    const NAME: &'static str = "explain";
+    type Category = Boolean;
+    type Input = Decided;
+    type Output = ExplainedVerdict;
+    type Record = ExplainRecord;
+
+    async fn run(
+        &self,
+        question: &Question,
+        input: Decided,
+    ) -> Result<Scored<ExplainedVerdict, ExplainRecord>, StepError> {
+        let Decided {
+            yes,
+            confidence,
+            sources,
+        } = input;
+        let Scored {
+            output,
+            record,
+            score,
+            model,
+            prompt_version,
+        } = self.explain(question, sources, Some(yes)).await?;
+        Ok(Scored {
+            output: ExplainedVerdict {
+                explained: output,
+                yes,
+                confidence,
+            },
+            record,
+            score,
+            model,
+            prompt_version,
+        })
+    }
+}
+
+#[cfg(test)]
 fn parse(text: &str) -> Result<Explanation, DeclineReason> {
     let raw: RawExplanation = serde_json::from_str(text)
         .map_err(|error| DeclineReason::InvalidModelOutput(error.to_string()))?;
+    convert(raw)
+}
+
+fn convert(raw: RawExplanation) -> Result<Explanation, DeclineReason> {
     Explanation::try_from(raw).map_err(|error| match error {
         InvalidExplanation::NoClaims => {
             DeclineReason::Unverified("the model found no answer in the sources".into())
@@ -235,8 +332,9 @@ fn escape(text: &str) -> String {
     escaped
 }
 
-fn schema() -> serde_json::Value {
-    json!({
+/// `verdict` adds the required `contradicts_verdict` flag.
+fn schema(verdict: bool) -> serde_json::Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "claims": {
@@ -263,7 +361,15 @@ fn schema() -> serde_json::Value {
         },
         "required": ["claims"],
         "additionalProperties": false
-    })
+    });
+    if verdict {
+        schema["properties"]["contradicts_verdict"] = json!({
+            "type": "boolean",
+            "description": "True when the cited sources contradict the verdict."
+        });
+        schema["required"] = json!(["claims", "contradicts_verdict"]);
+    }
+    schema
 }
 
 #[cfg(test)]

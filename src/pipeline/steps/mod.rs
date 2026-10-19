@@ -1,5 +1,6 @@
 //! The steps every category's pipeline is built from. See `docs/design.md` sections 5.3 to 5.5.
 
+mod answer;
 mod classify;
 mod explain;
 mod rerank;
@@ -7,18 +8,27 @@ mod retrieve;
 mod verify;
 
 pub use self::{
+    answer::{ANSWER_PROMPT_VERSION, Answer, Decided},
     classify::{CLASSIFY_PROMPT_VERSION, Classify},
-    explain::{Claim, Explain, Explained, Explanation, InvalidExplanation, PROMPT_VERSION},
+    explain::{
+        BOOLEAN_PROMPT_VERSION, Claim, Explain, Explained, ExplainedVerdict, Explanation,
+        InvalidExplanation, PROMPT_VERSION,
+    },
     rerank::{RERANK_PROMPT_VERSION, Rerank},
     retrieve::Retrieve,
-    verify::{Verified, VerifiedAnswer, Verify},
+    verify::{Verified, VerifiedAnswer, VerifiedVerdict, Verify},
 };
 
 use crate::retrieval::Retrieved;
 
 use super::{Open, Seq, trace::RankedChunk};
 
+/// Kev's smaller models are validated to 8,192 tokens; longer text is judged on its beginning.
+const MAX_STATE_CHARS: usize = 16_000;
+
 pub type OpenEnded = Seq<Explain<Open>, Verify<Open>>;
+/// System One decides, the LLM explains, Verify checks the citations. Only `Decisive<Boolean>` is a `Pipeline` so far.
+pub type Decisive<TCategory> = Seq<Answer<TCategory>, Seq<Explain<TCategory>, Verify<TCategory>>>;
 
 /// Output of `Retrieve`: hybrid matches, best first. Never empty.
 #[derive(Clone, Debug)]

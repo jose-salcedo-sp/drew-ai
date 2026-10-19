@@ -98,7 +98,7 @@ fn reports() -> Vec<(RunReport, &'static str)> {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn round_trips_every_outcome(pool: PgPool) -> anyhow::Result<()> {
+async fn round_trips_every_outcome(pool: PgPool) -> eros::Result<()> {
     let store = PgRunStore::new(pool.clone());
     let user = UserId("drew".into());
     for (report, status) in reports() {
@@ -119,7 +119,7 @@ async fn round_trips_every_outcome(pool: PgPool) -> anyhow::Result<()> {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn a_run_id_is_saved_once(pool: PgPool) -> anyhow::Result<()> {
+async fn a_run_id_is_saved_once(pool: PgPool) -> eros::Result<()> {
     let store = PgRunStore::new(pool);
     let (report, _) = reports().remove(0);
     store.save(&UserId("drew".into()), &report).await?;
@@ -128,7 +128,7 @@ async fn a_run_id_is_saved_once(pool: PgPool) -> anyhow::Result<()> {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn served_runs_are_persisted_in_postgres(pool: PgPool) -> anyhow::Result<()> {
+async fn served_runs_are_persisted_in_postgres(pool: PgPool) -> eros::Result<()> {
     let (report, _) = reports().remove(1);
     let state = AppState {
         answerer: Arc::new(CannedAnswerer {

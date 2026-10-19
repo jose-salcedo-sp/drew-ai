@@ -69,12 +69,12 @@ struct FailingStore;
 
 #[async_trait]
 impl RunStore for FailingStore {
-    async fn save(&self, _: &UserId, _: &RunReport) -> anyhow::Result<()> {
-        anyhow::bail!("database is down")
+    async fn save(&self, _: &UserId, _: &RunReport) -> eros::Result<()> {
+        eros::bail!("database is down")
     }
 
-    async fn get(&self, _: RunId) -> anyhow::Result<Option<StoredRun>> {
-        anyhow::bail!("database is down")
+    async fn get(&self, _: RunId) -> eros::Result<Option<StoredRun>> {
+        eros::bail!("database is down")
     }
 }
 

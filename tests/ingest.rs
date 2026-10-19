@@ -39,11 +39,7 @@ impl Embedder for RecordingEmbedder {
         self.model.clone()
     }
 
-    async fn embed(
-        &self,
-        texts: &[String],
-        purpose: EmbedPurpose,
-    ) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
         assert_eq!(purpose, EmbedPurpose::Document);
         self.batches.lock().unwrap().push(texts.to_vec());
         HashEmbedder.embed(texts, purpose).await
@@ -58,8 +54,8 @@ impl Source for FailingSource {
         SourceKind::Markdown
     }
 
-    async fn fetch_all(&self) -> anyhow::Result<Vec<Document>> {
-        anyhow::bail!("source is down")
+    async fn fetch_all(&self) -> eros::Result<Vec<Document>> {
+        eros::bail!("source is down")
     }
 }
 
@@ -289,9 +285,11 @@ async fn embedding_model_mismatch_is_refused(pool: PgPool) {
     let other = RecordingEmbedder::named(ModelRef::new("amazon.titan-embed-text-v2:0", "x"));
     let error = ingest(&pool, &other, &sources, false).await.unwrap_err();
 
-    let mismatch = error.downcast_ref::<EmbeddingModelMismatch>().unwrap();
-    assert_eq!(mismatch.current, [HashEmbedder.model()]);
     assert!(error.to_string().contains("--reembed"));
+    let mismatch = error
+        .narrow::<EmbeddingModelMismatch, _>()
+        .expect("a model mismatch, not a database error");
+    assert_eq!(mismatch.current, [HashEmbedder.model()]);
     assert!(other.batches().is_empty());
     assert_eq!(count(&pool, "true").await, 1);
 }
@@ -363,7 +361,7 @@ async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
     let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
 
     assert_eq!(reports[0].source, SourceKind::Markdown);
-    assert!(format!("{:#}", reports[0].error.as_ref().unwrap()).contains("source is down"));
+    assert!(format!("{:#?}", reports[0].error.as_ref().unwrap()).contains("source is down"));
     assert_eq!(reports[1].source, SourceKind::Markdown);
     assert!(reports[1].error.is_none());
     assert_eq!(reports[1].documents, 2);

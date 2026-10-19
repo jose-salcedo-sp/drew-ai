@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, bail, ensure};
 use async_trait::async_trait;
+use eros::{Context, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -19,27 +19,20 @@ fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
         .build()
-        .expect("reqwest client builds")
+        .expect("a client with only a timeout set always builds")
 }
 
 fn endpoint(base_url: &str, path: &str) -> String {
     format!("{}/{path}", base_url.trim_end_matches('/'))
 }
 
-async fn post(client: &reqwest::Client, url: &str, body: &Value) -> anyhow::Result<Value> {
-    let response = client
-        .post(url)
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
+#[eros::context("POST {}", url)]
+async fn post(client: &reqwest::Client, url: &str, body: &Value) -> eros::Result<Value> {
+    let response = client.post(url).json(body).send().await?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .with_context(|| format!("reading {url}"))?;
-    ensure!(status.is_success(), "POST {url} returned {status}: {text}");
-    serde_json::from_str(&text).with_context(|| format!("parsing the response from {url}"))
+    let text = response.text().await?;
+    ensure!(status.is_success(), "returned {status}: {text}");
+    Ok(serde_json::from_str(&text)?)
 }
 
 pub struct OpenAiChat {
@@ -79,7 +72,7 @@ pub fn chat_body(model: &str, request: &ChatRequest) -> Value {
 }
 
 /// The first choice's content, without the `<think>` block reasoning models such as Qwen3 may prepend.
-pub fn chat_text(response: &Value) -> anyhow::Result<String> {
+pub fn chat_text(response: &Value) -> eros::Result<String> {
     let content = response["choices"][0]["message"]["content"]
         .as_str()
         .context("response has no choices[0].message.content")?;
@@ -96,7 +89,7 @@ impl ChatModel for OpenAiChat {
         ModelRef::new(&self.model, "openai-compatible")
     }
 
-    async fn complete(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+    async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse> {
         let url = endpoint(&self.base_url, "chat/completions");
         let response = post(&self.client, &url, &chat_body(&self.model, &request)).await?;
         Ok(ChatResponse {
@@ -123,7 +116,7 @@ impl OpenAiEmbedder {
     }
 }
 
-pub fn embeddings(response: &Value, count: usize) -> anyhow::Result<Vec<Vec<f32>>> {
+pub fn embeddings(response: &Value, count: usize) -> eros::Result<Vec<Vec<f32>>> {
     #[derive(Deserialize)]
     struct Response {
         data: Vec<Item>,
@@ -160,11 +153,7 @@ impl Embedder for OpenAiEmbedder {
         ModelRef::new(&self.model, format!("dimensions={EMBEDDING_DIM}"))
     }
 
-    async fn embed(
-        &self,
-        texts: &[String],
-        _purpose: EmbedPurpose,
-    ) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn embed(&self, texts: &[String], _purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
         let url = endpoint(&self.base_url, "embeddings");
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in texts.chunks(EMBED_BATCH) {
@@ -253,7 +242,7 @@ mod tests {
             .complete(request(None))
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("not found"), "{error:#}");
+        assert!(format!("{error:#?}").contains("not found"), "{error:#?}");
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 pub mod markdown;
 
 use async_trait::async_trait;
+use eros::{IntoUnion, ReshapeUnion};
 use sqlx::PgPool;
 
 use crate::{
@@ -19,7 +20,7 @@ pub trait Source: Send + Sync {
     fn kind(&self) -> SourceKind;
 
     /// Every document in the source's current snapshot.
-    async fn fetch_all(&self) -> anyhow::Result<Vec<Document>>;
+    async fn fetch_all(&self) -> eros::Result<Vec<Document>>;
 }
 
 #[derive(Debug, clap::Args)]
@@ -35,7 +36,7 @@ pub struct Args {
     pub markdown: markdown::MarkdownArgs,
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub async fn run(args: Args) -> eros::Result<()> {
     let pool = store::connect(&args.db).await?;
     let embedder = llm::embedder(&args.embed).await?;
 
@@ -43,7 +44,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     if let Some(connector) = markdown::Connector::from_args(&args.markdown)? {
         sources.push(Box::new(connector));
     }
-    anyhow::ensure!(
+    eros::ensure!(
         !sources.is_empty(),
         "no sources are configured (set DREW_DOCS_DIR)"
     );
@@ -54,7 +55,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         .filter(|r| r.error.is_some())
         .map(|r| r.source.as_str())
         .collect();
-    anyhow::ensure!(
+    eros::ensure!(
         failed.is_empty(),
         "ingest failed for: {}",
         failed.join(", ")
@@ -78,27 +79,27 @@ pub struct SourceReport {
     pub documents: u64,
     pub stored: Stored,
     /// Set when the source failed; counts cover what was stored before the failure.
-    pub error: Option<anyhow::Error>,
+    pub error: Option<eros::ErrorUnion>,
 }
 
-/// Ingests every source independently: a failing source does not stop the others.
+/// Ingests every source independently: a failing source does not stop the others; its error is in its report.
 /// Fails before touching any source with `EmbeddingModelMismatch` when current chunks use another model and `reembed` is off.
 pub async fn ingest(
     pool: &PgPool,
     embedder: &dyn Embedder,
     sources: &[Box<dyn Source>],
     reembed: bool,
-) -> anyhow::Result<Vec<SourceReport>> {
+) -> eros::Result<Vec<SourceReport>, (EmbeddingModelMismatch, sqlx::Error)> {
     let store = ChunkStore::new(pool.clone());
     let model = embedder.model();
 
-    let current = store.current_embedding_models().await?;
+    let current = store.current_embedding_models().await.widen()?;
     if !reembed && current.iter().any(|m| *m != model) {
         return Err(EmbeddingModelMismatch {
             current,
             configured: model,
-        }
-        .into());
+        })
+        .union();
     }
 
     let mut reports = Vec::new();
@@ -125,7 +126,7 @@ pub async fn ingest(
                     documents = report.documents,
                     new_versions = report.stored.new_versions,
                     superseded = report.stored.superseded,
-                    error = format!("{e:#}"),
+                    error = format!("{e:#?}"),
                     "source failed"
                 );
                 report.error = Some(e);
@@ -135,7 +136,7 @@ pub async fn ingest(
     }
 
     if reembed && reports.iter().all(|r| r.error.is_none()) {
-        let superseded = store.supersede_other_models(&model).await?;
+        let superseded = store.supersede_other_models(&model).await.widen()?;
         if superseded > 0 {
             tracing::warn!(
                 superseded,
@@ -151,12 +152,12 @@ async fn ingest_source(
     embedder: &dyn Embedder,
     source: &dyn Source,
     report: &mut SourceReport,
-) -> anyhow::Result<()> {
+) -> eros::Result<()> {
     let kind = source.kind();
     let documents = source.fetch_all().await?;
     let mut seen = Vec::with_capacity(documents.len());
     for document in &documents {
-        anyhow::ensure!(
+        eros::ensure!(
             document.source == kind,
             "{} source returned document {}",
             kind.as_str(),
@@ -188,7 +189,7 @@ pub mod fakes {
             self.kind
         }
 
-        async fn fetch_all(&self) -> anyhow::Result<Vec<Document>> {
+        async fn fetch_all(&self) -> eros::Result<Vec<Document>> {
             Ok(self.documents.clone())
         }
     }

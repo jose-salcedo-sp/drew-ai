@@ -130,6 +130,8 @@ pub enum DeclineReason {
     InvalidModelOutput(String),
     NoSources,
     Unverified(String),
+    /// `Explain` found that the sources it would cite contradict System One's verdict.
+    ContradictsVerdict,
 }
 
 /// A step that cannot produce its output. The record, when present, keeps the raw model output in the trace.
@@ -144,7 +146,7 @@ pub struct StepError {
 #[derive(Debug)]
 pub enum StepErrorKind {
     Decline(DeclineReason),
-    Failed(anyhow::Error),
+    Failed(eros::ErrorUnion),
 }
 
 impl StepError {
@@ -173,7 +175,7 @@ impl StepError {
     }
 }
 
-impl<E: Into<anyhow::Error>> From<E> for StepError {
+impl<E: Into<eros::ErrorUnion>> From<E> for StepError {
     fn from(error: E) -> Self {
         Self {
             kind: StepErrorKind::Failed(error.into()),
@@ -393,7 +395,7 @@ async fn execute<TStep: Step>(
                     threshold,
                 },
                 StepErrorKind::Failed(error) => Halt::Failed {
-                    error: format!("{error:#}"),
+                    error: format!("{error:#?}"),
                 },
             };
             (

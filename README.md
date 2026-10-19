@@ -19,7 +19,9 @@ What works today:
 - Optional Slack bot when `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are set.
 - `drew eval` and local or Bedrock models.
 
-Not built yet: the Answer step (milestone 6), so `boolean`, `choice`, and `ranking` questions are classified but answered through the `open` path; confidence thresholds; permission enforcement.
+Yes/no questions get a verdict: Kev answers yes or no over the reranked sources, the LLM explains why, and the run declines when the sources contradict the verdict or Kev is not confident enough. A classification below `classify.min_confidence` falls back to `open`.
+
+Not built yet: Answer for `choice` and `ranking` (they take the `open` path); permission enforcement.
 
 ## How a question is answered
 
@@ -48,14 +50,18 @@ sequenceDiagram
         P->>DB: full text top 50 and vector top 50, fused by RRF
         DB-->>P: 50 chunks, with neighbouring sections as context
     end
-    Note over P: Until Answer lands (milestone 6), every category takes the open path
+    Note over P: Below classify.min_confidence, or choice and ranking: the open path
     loop Rerank: each of the top 25 matches
         P->>K: does this text help answer the question?
         K-->>P: probability of yes
     end
-    Note over P: Rerank keeps the 5 most likely matches
-    P->>L: Explain: question and 5 sources, delimited as data
-    L-->>P: claims as JSON, each citing chunk ids
+    Note over P: Rerank fuses that with retrieval rank and keeps 5
+    opt boolean
+        P->>K: Answer: going by these sources, is the answer yes?
+        K-->>P: verdict and its confidence, checked against the threshold
+    end
+    P->>L: Explain: question, 5 sources and any verdict, delimited as data
+    L-->>P: claims as JSON citing chunk ids, a contradiction declines
     Note over P: Verify: an uncited claim, or a citation outside<br/>this run's chunks, declines the run
     P-->>S: run report (answered, declined or failed) and trace
     S->>DB: save the run and its trace
@@ -138,6 +144,8 @@ Switching embedding models requires `drew ingest --reembed`.
 | `drew eval run …` / `drew eval tune …` | Golden-set metrics and threshold tuning. `eval/golden/daas.jsonl` holds DaaS's own golden questions (`_ops/EVAL.md`, held out of the corpus): `drew eval run --golden eval/golden/daas.jsonl --out eval/results/daas.json --concurrency 2` |
 
 ## Configuration
+
+Tunables (retrieval, the Classify fallback, Rerank, step thresholds) are in [`config/drew.json`](config/drew.json), or the file `DREW_CONFIG` names; unknown keys are rejected. `drew eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file.
 
 See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), model URLs, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
 

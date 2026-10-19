@@ -34,7 +34,7 @@ pub struct Bot {
 
 impl Bot {
     /// An empty token counts as unset, as in `.env.example`.
-    pub fn from_args(args: &SlackArgs) -> anyhow::Result<Option<Self>> {
+    pub fn from_args(args: &SlackArgs) -> eros::Result<Option<Self>> {
         let set = |token: &Option<String>| token.clone().filter(|t| !t.trim().is_empty());
         match (set(&args.app_token), set(&args.bot_token)) {
             (None, None) => Ok(None),
@@ -42,7 +42,7 @@ impl Bot {
                 api: Arc::new(SlackClient::new(app, bot)),
             })),
             _ => {
-                anyhow::bail!("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must both be set or both unset")
+                eros::bail!("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must both be set or both unset")
             }
         }
     }
@@ -55,7 +55,7 @@ impl Bot {
         self,
         state: AppState,
         shutdown: tokio::sync::watch::Receiver<bool>,
-    ) -> anyhow::Result<()> {
+    ) -> eros::Result<()> {
         let api = self.api.clone();
         let mut backoff = std::time::Duration::from_secs(1);
         loop {
@@ -72,7 +72,7 @@ impl Bot {
                     let api = api.clone();
                     tokio::spawn(async move {
                         if let Err(error) = handle_event(&state, api.as_ref(), event).await {
-                            tracing::warn!(error = format!("{error:#}"), "slack event failed");
+                            tracing::warn!(error = format!("{error:#?}"), "slack event failed");
                         }
                     });
                 },
@@ -82,7 +82,7 @@ impl Bot {
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
-                    tracing::warn!(error = format!("{error:#}"), "slack socket reconnecting");
+                    tracing::warn!(error = format!("{error:#?}"), "slack socket reconnecting");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
                 }
@@ -95,7 +95,7 @@ pub(crate) async fn handle_event(
     state: &AppState,
     api: &dyn SlackApi,
     event: Value,
-) -> anyhow::Result<()> {
+) -> eros::Result<()> {
     if event.get("bot_id").is_some() || event.get("subtype").is_some() {
         return Ok(());
     }
@@ -112,7 +112,7 @@ pub(crate) async fn handle_event(
             let channel = event
                 .get("channel")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("app_mention missing channel"))?;
+                .ok_or_else(|| eros::error!("app_mention missing channel"))?;
             let thread = event
                 .get("thread_ts")
                 .or_else(|| event.get("ts"))
@@ -127,7 +127,7 @@ pub(crate) async fn handle_event(
             let channel = event
                 .get("channel")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("dm missing channel"))?;
+                .ok_or_else(|| eros::error!("dm missing channel"))?;
             let thread = event.get("thread_ts").and_then(Value::as_str);
             (text.trim().to_owned(), channel, thread)
         }
@@ -136,7 +136,7 @@ pub(crate) async fn handle_event(
     let slack_user = event
         .get("user")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("event missing user"))?;
+        .ok_or_else(|| eros::error!("event missing user"))?;
     answer_in_slack(
         state,
         api,
@@ -155,7 +155,7 @@ async fn answer_in_slack(
     channel: &str,
     thread_ts: Option<&str>,
     question: Question,
-) -> anyhow::Result<()> {
+) -> eros::Result<()> {
     let placeholder_ts = api
         .post_message(channel, thread_ts, "Looking that up...")
         .await?;
@@ -165,8 +165,8 @@ async fn answer_in_slack(
     let text = match persist_and_render(state, &user, &report).await {
         Ok(content) => content,
         Err(error) => {
-            tracing::error!(%run_id, error = format!("{error:#}"), "slack run failed");
-            format!("Run {run_id} could not be completed: {error:#}")
+            tracing::error!(%run_id, error = format!("{error:#?}"), "slack run failed");
+            format!("Run {run_id} could not be completed: {error:#?}")
         }
     };
     api.update_message(channel, &placeholder_ts, &text).await?;
@@ -177,7 +177,7 @@ async fn persist_and_render(
     state: &AppState,
     user: &UserId,
     report: &RunReport,
-) -> anyhow::Result<String> {
+) -> eros::Result<String> {
     state.runs.save(user, report).await?;
     let id = report.id.to_string();
     Ok(match &report.outcome {

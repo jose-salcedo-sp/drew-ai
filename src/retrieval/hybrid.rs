@@ -7,8 +7,8 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use eros::{Context, error};
 use pgvector::Vector;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -22,7 +22,7 @@ use super::{Retrieved, Retriever};
 
 /// Retrieval knobs; `drew eval` tunes them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HybridConfig {
     /// Full-text candidates fed to fusion; 0 disables the full-text side.
     pub full_text_candidates: usize,
@@ -93,7 +93,8 @@ impl HybridRetriever {
 
     /// Fails with `EmbeddingModelMismatch` unless every current chunk uses the embedder's model.
     /// Returns false when there are no current chunks.
-    async fn check_embedding_model(&self) -> anyhow::Result<bool> {
+    #[eros::context("checking the embedding model of current chunks")]
+    async fn check_embedding_model(&self) -> eros::Result<bool> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "(SELECT embedding_model, embedding_model_version FROM chunks
               WHERE superseded_at IS NULL ORDER BY 1, 2 LIMIT 1)
@@ -102,8 +103,7 @@ impl HybridRetriever {
               WHERE superseded_at IS NULL ORDER BY 1 DESC, 2 DESC LIMIT 1)",
         )
         .fetch_all(&self.pool)
-        .await
-        .context("reading current embedding models")?;
+        .await?;
         let mut found: Vec<ModelRef> = rows
             .into_iter()
             .map(|(id, version)| ModelRef::new(id, version))
@@ -116,11 +116,12 @@ impl HybridRetriever {
         Ok(!found.is_empty())
     }
 
+    #[eros::context("full-text candidates")]
     async fn full_text_candidates(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         query: &str,
-    ) -> anyhow::Result<Vec<ChunkId>> {
+    ) -> eros::Result<Vec<ChunkId>> {
         let prose = prose_terms(query);
         let identifiers = identifier_terms(query);
         if self.config.full_text_candidates == 0 || (prose.is_empty() && identifiers.is_empty()) {
@@ -151,16 +152,16 @@ impl HybridRetriever {
         .bind(&identifiers)
         .bind(i64::try_from(self.config.full_text_candidates)?)
         .fetch_all(&mut **tx)
-        .await
-        .context("full-text candidates")?;
+        .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
     }
 
+    #[eros::context("vector candidates")]
     async fn vector_candidates(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         embedding: Vec<f32>,
-    ) -> anyhow::Result<Vec<ChunkId>> {
+    ) -> eros::Result<Vec<ChunkId>> {
         // HNSW returns at most `ef_search` rows, and pgvector's default (40) is below the default candidate count.
         let ef_search = (2 * self.config.vector_candidates).clamp(40, 1000);
         sqlx::query("SELECT set_config('hnsw.ef_search', $1, true)")
@@ -173,18 +174,18 @@ impl HybridRetriever {
         .bind(Vector::from(embedding))
         .bind(i64::try_from(self.config.vector_candidates)?)
         .fetch_all(&mut **tx)
-        .await
-        .context("vector candidates")?;
+        .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
     }
 
     /// Current rows for `hits`, plus the adjacent current chunks (by ordinal) of each hit's document.
+    #[eros::context("fetching retrieved chunks")]
     async fn fetch_with_neighbours(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         hits: &[String],
-    ) -> anyhow::Result<Vec<ChunkRow>> {
-        sqlx::query_as(
+    ) -> eros::Result<Vec<ChunkRow>> {
+        Ok(sqlx::query_as(
             "WITH pages AS (
                  SELECT c.document_id, c.ordinal
                  FROM chunks c
@@ -208,14 +209,13 @@ impl HybridRetriever {
         )
         .bind(hits)
         .fetch_all(&mut **tx)
-        .await
-        .context("fetching retrieved chunks")
+        .await?)
     }
 }
 
 #[async_trait]
 impl Retriever for HybridRetriever {
-    async fn retrieve(&self, query: &str) -> anyhow::Result<Vec<Retrieved>> {
+    async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>> {
         if query.trim().is_empty() || !self.check_embedding_model().await? {
             return Ok(Vec::new());
         }
@@ -285,7 +285,7 @@ fn expand(
     hits: &[(ChunkId, f64)],
     rows: Vec<ChunkRow>,
     max_per_document: usize,
-) -> anyhow::Result<Vec<Retrieved>> {
+) -> eros::Result<Vec<Retrieved>> {
     let mut chunks = HashMap::new();
     let mut pages: HashMap<DocumentId, Vec<(i32, ChunkId)>> = HashMap::new();
     for row in rows {
@@ -303,7 +303,7 @@ fn expand(
     for (id, fused) in hits {
         let hit = chunks
             .get(id)
-            .ok_or_else(|| anyhow!("hit {} has no current row", id.0))?;
+            .ok_or_else(|| error!("hit {} has no current row", id.0))?;
         let score = *fused as f32;
         result.add(hit, score, None);
         let Some(page) = pages.get(&hit.document_id) else {
@@ -312,7 +312,7 @@ fn expand(
         let at = page
             .iter()
             .position(|(_, chunk)| chunk == id)
-            .ok_or_else(|| anyhow!("hit {} missing from its page", id.0))?;
+            .ok_or_else(|| error!("hit {} missing from its page", id.0))?;
         let neighbours = [at.checked_sub(1), Some(at + 1)]
             .into_iter()
             .flatten()
@@ -420,29 +420,25 @@ struct ChunkRow {
 }
 
 impl TryFrom<ChunkRow> for Chunk {
-    type Error = anyhow::Error;
+    type Error = eros::ErrorUnion;
 
-    fn try_from(row: ChunkRow) -> anyhow::Result<Self> {
+    fn try_from(row: ChunkRow) -> eros::Result<Self> {
         let source = match row.source.as_str() {
             "markdown" => SourceKind::Markdown,
             "confluence" | "jira" | "slack" => {
-                return Err(anyhow!(
+                return Err(error!(
                     "chunk {} is from legacy source {}; re-ingest the markdown corpus",
-                    row.id,
-                    row.source
+                    row.id, row.source
                 ));
             }
-            other => return Err(anyhow!("chunk {} has unknown source {other:?}", row.id)),
+            other => return Err(error!("chunk {} has unknown source {other:?}", row.id)),
         };
         let sensitivity = match row.sensitivity.as_str() {
             "public" => Sensitivity::Public,
             "internal" => Sensitivity::Internal,
             "confidential" => Sensitivity::Confidential,
             other => {
-                return Err(anyhow!(
-                    "chunk {} has unknown sensitivity {other:?}",
-                    row.id
-                ));
+                return Err(error!("chunk {} has unknown sensitivity {other:?}", row.id));
             }
         };
         Ok(Chunk {

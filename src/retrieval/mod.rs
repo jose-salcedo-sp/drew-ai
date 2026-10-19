@@ -21,5 +21,5 @@ pub struct Retrieved {
 #[async_trait]
 pub trait Retriever: Send + Sync {
     /// Top hybrid matches, expanded to their parent unit and deduplicated, best first.
-    async fn retrieve(&self, query: &str) -> anyhow::Result<Vec<Retrieved>>;
+    async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>>;
 }

@@ -17,23 +17,36 @@ pub struct MemoryRunStore {
 
 #[async_trait]
 impl RunStore for MemoryRunStore {
-    async fn save(&self, user: &UserId, report: &RunReport) -> anyhow::Result<()> {
+    async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()> {
         let run = StoredRun {
             user: user.clone(),
             created_at: Utc::now(),
             report: report.clone(),
         };
-        self.runs.lock().unwrap().insert(report.id, run);
+        self.runs
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .insert(report.id, run);
         Ok(())
     }
 
-    async fn get(&self, id: RunId) -> anyhow::Result<Option<StoredRun>> {
-        Ok(self.runs.lock().unwrap().get(&id).cloned())
+    async fn get(&self, id: RunId) -> eros::Result<Option<StoredRun>> {
+        Ok(self
+            .runs
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .get(&id)
+            .cloned())
     }
 }
 
 impl MemoryRunStore {
     pub fn stored(&self) -> Vec<StoredRun> {
-        self.runs.lock().unwrap().values().cloned().collect()
+        self.runs
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .values()
+            .cloned()
+            .collect()
     }
 }

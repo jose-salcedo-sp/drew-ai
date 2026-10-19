@@ -32,13 +32,27 @@ const OPTIONS: [(CategoryKind, &str, &str); 4] = [
 ];
 
 /// Asks System One which category the question is. Without a System One every question is `open`.
+///
+/// A decisive category chosen with a probability below `min_confidence` falls back to `open`: an explanation
+/// cannot be wrong the way a forced yes or no can. The step's score stays System One's probability.
 pub struct Classify {
     system_one: Option<Arc<dyn SystemOne>>,
+    min_confidence: Option<Score>,
 }
 
 impl Classify {
     pub fn new(system_one: Option<Arc<dyn SystemOne>>) -> Self {
-        Self { system_one }
+        Self {
+            system_one,
+            min_confidence: None,
+        }
+    }
+
+    pub fn with_min_confidence(self, min_confidence: Option<Score>) -> Self {
+        Self {
+            min_confidence,
+            ..self
+        }
     }
 
     fn request(question: &Question) -> DecisionRequest {
@@ -102,6 +116,7 @@ impl Step for Classify {
             let record = ClassifyRecord {
                 raw: None,
                 category: Some(category),
+                fallback_from: None,
             };
             return Ok(Scored::new(category, record));
         };
@@ -115,17 +130,25 @@ impl Step for Classify {
             })?;
         let answer = response.answers.get(QUESTION_ID);
         let raw = answer.and_then(|answer| serde_json::to_string(answer).ok());
-        let (category, score) = parse(answer).map_err(|reason| {
+        let (chosen, score) = parse(answer).map_err(|reason| {
             StepError::decline(reason)
                 .with_record(ClassifyRecord {
                     raw: raw.clone(),
                     category: None,
+                    fallback_from: None,
                 })
                 .with_model(model.clone(), CLASSIFY_PROMPT_VERSION)
         })?;
+        let unsure = self.min_confidence.is_some_and(|min| score < min);
+        let (category, fallback_from) = if unsure && chosen != CategoryKind::Open {
+            (CategoryKind::Open, Some(chosen))
+        } else {
+            (chosen, None)
+        };
         let record = ClassifyRecord {
             raw,
             category: Some(category),
+            fallback_from,
         };
         Ok(Scored::new(category, record)
             .with_score(score)
@@ -179,6 +202,33 @@ mod tests {
         };
         let names: Vec<_> = criteria.0.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["boolean", "choice", "ranking", "open"]);
+    }
+
+    #[tokio::test]
+    async fn an_unsure_decisive_category_falls_back_to_open() {
+        let unsure = |category: &str, p: f32| {
+            let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice(category, p))]));
+            async move {
+                Classify::new(Some(system_one))
+                    .with_min_confidence(Some(Score(0.6)))
+                    .run(&Question::new("q"), Asked)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let scored = unsure("boolean", 0.55).await;
+        assert_eq!(scored.output, CategoryKind::Open);
+        assert_eq!(scored.score, Some(Score(0.55)));
+        assert_eq!(scored.record.fallback_from, Some(CategoryKind::Boolean));
+
+        let scored = unsure("boolean", 0.65).await;
+        assert_eq!(scored.output, CategoryKind::Boolean);
+        assert_eq!(scored.record.fallback_from, None);
+
+        let scored = unsure("open", 0.3).await;
+        assert_eq!(scored.output, CategoryKind::Open);
+        assert_eq!(scored.record.fallback_from, None);
     }
 
     #[tokio::test]

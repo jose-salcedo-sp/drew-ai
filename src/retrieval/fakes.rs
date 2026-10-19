@@ -13,7 +13,7 @@ pub struct KeywordRetriever {
 
 #[async_trait]
 impl Retriever for KeywordRetriever {
-    async fn retrieve(&self, query: &str) -> anyhow::Result<Vec<Retrieved>> {
+    async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>> {
         let query = words(query);
         if query.is_empty() {
             return Ok(Vec::new());
