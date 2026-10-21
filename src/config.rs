@@ -14,6 +14,7 @@ use crate::{
     retrieval::hybrid::HybridConfig,
 };
 
+/// Read when neither `--config` nor `DREW_CONFIG` names a file; relative to the working directory.
 pub const DEFAULT_PATH: &str = "config/drew.json";
 
 /// A step whose score `Run::then` checks against a threshold. `classify` has `classify.min_confidence` instead,
@@ -21,11 +22,14 @@ pub const DEFAULT_PATH: &str = "config/drew.json";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "&'static str", try_from = "String")]
 pub enum StepName {
+    /// [`crate::pipeline::steps::Rerank`], scored by the best kept match's probability.
     Rerank,
+    /// [`crate::pipeline::steps::Answer`], scored by the verdict's confidence.
     Answer,
 }
 
 impl StepName {
+    /// Every variant, in declaration order.
     pub const ALL: [Self; 2] = [Self::Rerank, Self::Answer];
 
     /// The step's `Step::NAME`, as recorded in the trace.
@@ -49,6 +53,7 @@ impl From<StepName> for &'static str {
     }
 }
 
+/// A step name with no threshold, rejected when parsing a config or tune candidate.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "no threshold applies to step `{0}`; thresholded steps are {steps} (classify uses classify.min_confidence)",
@@ -81,10 +86,12 @@ impl TryFrom<String> for StepName {
 pub struct Thresholds(BTreeMap<StepName, Probability>);
 
 impl Thresholds {
+    /// `None` when the step is not listed, so it has no threshold.
     pub fn get(&self, step: StepName) -> Option<Probability> {
         self.0.get(&step).copied()
     }
 
+    /// No step is listed.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -96,6 +103,7 @@ impl FromIterator<(StepName, Probability)> for Thresholds {
     }
 }
 
+/// Where to load the [`PipelineConfig`] from.
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct ConfigArgs {
     /// Pipeline configuration JSON. Unset: `config/drew.json` when it exists, else built-in defaults.
@@ -104,7 +112,11 @@ pub struct ConfigArgs {
 }
 
 impl ConfigArgs {
-    /// An empty `DREW_CONFIG`, as in `.env.example`, counts as unset.
+    /// Loads and validates the config. An empty `DREW_CONFIG`, as in `.env.example`, counts as unset.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, is not valid JSON, has unknown keys, or fails [`PipelineConfig::parse`]'s checks.
     pub fn load(&self) -> eros::Result<PipelineConfig> {
         match self
             .path
@@ -123,11 +135,15 @@ impl ConfigArgs {
     }
 }
 
+/// Every pipeline tunable. Missing keys take their defaults; unknown keys are rejected.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PipelineConfig {
+    /// Hybrid search tunables.
     pub retrieval: HybridConfig,
+    /// When a classification is confident enough to leave the `open` path.
     pub classify: ClassifyConfig,
+    /// How many matches System One judges and keeps.
     pub rerank: RerankConfig,
     /// The shape of a `drew eval tune` candidate's `thresholds`.
     pub thresholds: Thresholds,
@@ -135,6 +151,7 @@ pub struct PipelineConfig {
     pub per_category: PerCategory,
 }
 
+/// [`PipelineConfig::classify`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClassifyConfig {
@@ -142,6 +159,7 @@ pub struct ClassifyConfig {
     pub min_confidence: Option<Probability>,
 }
 
+/// [`PipelineConfig::rerank`]. [`PipelineConfig::parse`] requires `0 < top_k <= candidates`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RerankConfig {
@@ -163,15 +181,20 @@ impl Default for RerankConfig {
     }
 }
 
+/// Threshold overrides per category; a step a category does not list uses [`PipelineConfig::thresholds`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PerCategory {
+    /// For [`CategoryKind::Boolean`] runs.
     #[serde(skip_serializing_if = "Thresholds::is_empty")]
     pub boolean: Thresholds,
+    /// For [`CategoryKind::Choice`] runs.
     #[serde(skip_serializing_if = "Thresholds::is_empty")]
     pub choice: Thresholds,
+    /// For [`CategoryKind::Ranking`] runs.
     #[serde(skip_serializing_if = "Thresholds::is_empty")]
     pub ranking: Thresholds,
+    /// For [`CategoryKind::Open`] runs.
     #[serde(skip_serializing_if = "Thresholds::is_empty")]
     pub open: Thresholds,
 }
@@ -200,10 +223,21 @@ impl PerCategory {
 }
 
 impl PipelineConfig {
+    /// Reads and parses the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, or as [`PipelineConfig::parse`].
     pub fn read(path: &Path) -> eros::Result<Self> {
         read(path)
     }
 
+    /// Parses JSON and checks invariants across fields.
+    ///
+    /// # Errors
+    ///
+    /// On invalid JSON, an unknown key, a probability outside `0..=1`, an unthresholded step name, or rerank
+    /// counts that break `0 < top_k <= candidates`.
     pub fn parse(text: &str) -> eros::Result<Self> {
         let config: Self = serde_json::from_str(text)?;
         config.validate()?;
