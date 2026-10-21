@@ -2,8 +2,9 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,9 +16,85 @@ use crate::{
 
 pub const DEFAULT_PATH: &str = "config/drew.json";
 
-/// Steps whose score `Run::then` checks against a threshold. `classify` has `classify.min_confidence` instead,
+/// A step whose score `Run::then` checks against a threshold. `classify` has `classify.min_confidence` instead,
 /// which falls back to `open` rather than declining; `explain` and `verify` are not scored.
-pub const THRESHOLDED_STEPS: [&str; 2] = ["rerank", "answer"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "&'static str", try_from = "String")]
+pub enum StepName {
+    Rerank,
+    Answer,
+}
+
+impl StepName {
+    pub const ALL: [Self; 2] = [Self::Rerank, Self::Answer];
+
+    /// The step's `Step::NAME`, as recorded in the trace.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rerank => "rerank",
+            Self::Answer => "answer",
+        }
+    }
+}
+
+impl fmt::Display for StepName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<StepName> for &'static str {
+    fn from(step: StepName) -> Self {
+        step.as_str()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "no threshold applies to step `{0}`; thresholded steps are {steps} (classify uses classify.min_confidence)",
+    steps = StepName::ALL.map(StepName::as_str).join(", ")
+)]
+pub struct UnknownStep(String);
+
+impl FromStr for StepName {
+    type Err = UnknownStep;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|step| step.as_str() == name)
+            .ok_or_else(|| UnknownStep(name.to_owned()))
+    }
+}
+
+impl TryFrom<String> for StepName {
+    type Error = UnknownStep;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        name.parse()
+    }
+}
+
+/// Minimum score per thresholded step. A step not listed has no threshold.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Thresholds(BTreeMap<StepName, Probability>);
+
+impl Thresholds {
+    pub fn get(&self, step: StepName) -> Option<Probability> {
+        self.0.get(&step).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<(StepName, Probability)> for Thresholds {
+    fn from_iter<T: IntoIterator<Item = (StepName, Probability)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
 
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct ConfigArgs {
@@ -52,8 +129,8 @@ pub struct PipelineConfig {
     pub retrieval: HybridConfig,
     pub classify: ClassifyConfig,
     pub rerank: RerankConfig,
-    /// Minimum score per step, keyed by the step's trace name; the shape of a `drew eval tune` candidate.
-    pub thresholds: BTreeMap<String, Probability>,
+    /// The shape of a `drew eval tune` candidate's `thresholds`.
+    pub thresholds: Thresholds,
     /// Overrides `thresholds` for runs classified into that category.
     pub per_category: PerCategory,
 }
@@ -89,18 +166,18 @@ impl Default for RerankConfig {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PerCategory {
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub boolean: BTreeMap<String, Probability>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub choice: BTreeMap<String, Probability>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub ranking: BTreeMap<String, Probability>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub open: BTreeMap<String, Probability>,
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub boolean: Thresholds,
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub choice: Thresholds,
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub ranking: Thresholds,
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub open: Thresholds,
 }
 
 impl PerCategory {
-    fn get(&self, category: CategoryKind) -> &BTreeMap<String, Probability> {
+    fn get(&self, category: CategoryKind) -> &Thresholds {
         match category {
             CategoryKind::Boolean => &self.boolean,
             CategoryKind::Choice => &self.choice,
@@ -109,8 +186,16 @@ impl PerCategory {
         }
     }
 
-    fn all(&self) -> impl Iterator<Item = &BTreeMap<String, Probability>> {
-        [&self.boolean, &self.choice, &self.ranking, &self.open].into_iter()
+    /// The category's override, else `general`. A run with no category uses `general`.
+    pub fn threshold(
+        &self,
+        general: &Thresholds,
+        category: Option<CategoryKind>,
+        step: StepName,
+    ) -> Option<Probability> {
+        category
+            .and_then(|category| self.get(category).get(step))
+            .or_else(|| general.get(step))
     }
 }
 
@@ -130,25 +215,13 @@ impl PipelineConfig {
             self.rerank.top_k > 0 && self.rerank.candidates >= self.rerank.top_k,
             "rerank needs 0 < top_k <= candidates"
         );
-        for thresholds in std::iter::once(&self.thresholds).chain(self.per_category.all()) {
-            for step in thresholds.keys() {
-                eros::ensure!(
-                    THRESHOLDED_STEPS.contains(&step.as_str()),
-                    "no threshold applies to step `{step}`; thresholded steps are {THRESHOLDED_STEPS:?} \
-                     (classify uses classify.min_confidence)"
-                );
-            }
-        }
         Ok(())
     }
 
     /// The category's override, else the general threshold.
-    pub fn threshold(&self, category: CategoryKind, step: &str) -> Option<Probability> {
+    pub fn threshold(&self, category: CategoryKind, step: StepName) -> Option<Probability> {
         self.per_category
-            .get(category)
-            .get(step)
-            .or_else(|| self.thresholds.get(step))
-            .copied()
+            .threshold(&self.thresholds, Some(category), step)
     }
 }
 
@@ -167,7 +240,11 @@ mod tests {
     fn shipped_config_parses() {
         let config = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
         assert!(config.classify.min_confidence.is_some());
-        assert!(config.threshold(CategoryKind::Boolean, "answer").is_some());
+        assert!(
+            config
+                .threshold(CategoryKind::Boolean, StepName::Answer)
+                .is_some()
+        );
     }
 
     #[test]
@@ -197,14 +274,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.threshold(CategoryKind::Boolean, "answer"),
+            config.threshold(CategoryKind::Boolean, StepName::Answer),
             Some(Probability::new(0.8).unwrap())
         );
         assert_eq!(
-            config.threshold(CategoryKind::Open, "answer"),
+            config.threshold(CategoryKind::Open, StepName::Answer),
             Some(Probability::new(0.6).unwrap())
         );
-        assert_eq!(config.threshold(CategoryKind::Open, "rerank"), None);
+        assert_eq!(config.threshold(CategoryKind::Open, StepName::Rerank), None);
     }
 
     #[test]
@@ -218,6 +295,37 @@ mod tests {
         ] {
             assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_misspelled_step_is_rejected_by_name() {
+        for (bad, key) in [
+            (r#"{"thresholds": {"anser": 0.7}}"#, "anser"),
+            (
+                r#"{"per_category": {"boolean": {"rerankk": 0.7}}}"#,
+                "rerankk",
+            ),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(&format!("`{key}`")), "{error}");
+        }
+    }
+
+    #[test]
+    fn step_names_match_the_steps_they_threshold() {
+        use crate::pipeline::{
+            Boolean, Open, Step,
+            steps::{Answer, Rerank},
+        };
+        assert_eq!(StepName::Rerank.as_str(), <Rerank<Open> as Step>::NAME);
+        assert_eq!(StepName::Answer.as_str(), <Answer<Boolean> as Step>::NAME);
+    }
+
+    #[test]
+    fn shipped_config_round_trips() {
+        let config = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let text = serde_json::to_string(&config).unwrap();
+        assert_eq!(PipelineConfig::parse(&text).unwrap(), config);
     }
 
     #[test]
