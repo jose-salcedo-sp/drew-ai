@@ -11,6 +11,7 @@ mod tests;
 use std::sync::Arc;
 
 use serde_json::Value;
+use tokio::sync::watch;
 
 use crate::{
     domain::{Question, UserId},
@@ -18,7 +19,10 @@ use crate::{
     server::AppState,
 };
 
-use self::api::{SlackApi, SlackClient};
+use self::{
+    api::{SlackApi, SlackClient},
+    socket::{Backoff, Connector, WebSocketConnector},
+};
 
 #[derive(Debug, clap::Args)]
 pub struct SlackArgs {
@@ -30,6 +34,7 @@ pub struct SlackArgs {
 
 pub struct Bot {
     api: Arc<dyn SlackApi>,
+    connector: Arc<dyn Connector>,
 }
 
 impl Bot {
@@ -38,57 +43,65 @@ impl Bot {
         let set = |token: &Option<String>| token.clone().filter(|t| !t.trim().is_empty());
         match (set(&args.app_token), set(&args.bot_token)) {
             (None, None) => Ok(None),
-            (Some(app), Some(bot)) => Ok(Some(Self {
-                api: Arc::new(SlackClient::new(app, bot)?),
-            })),
+            (Some(app), Some(bot)) => Ok(Some(Self::new(
+                Arc::new(SlackClient::new(app, bot)?),
+                Arc::new(WebSocketConnector),
+            ))),
             _ => {
                 eros::bail!("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must both be set or both unset")
             }
         }
     }
 
-    pub fn with_api(api: Arc<dyn SlackApi>) -> Self {
-        Self { api }
+    pub fn new(api: Arc<dyn SlackApi>, connector: Arc<dyn Connector>) -> Self {
+        Self { api, connector }
     }
 
-    pub async fn run(
-        self,
-        state: AppState,
-        shutdown: tokio::sync::watch::Receiver<bool>,
-    ) -> eros::Result<()> {
-        let api = self.api;
-        let mut backoff = std::time::Duration::from_secs(1);
+    /// Reconnects until `shutdown` turns true or its sender is dropped.
+    pub async fn run(self, state: AppState, mut shutdown: watch::Receiver<bool>) {
+        let mut backoff = Backoff::default();
         loop {
-            if *shutdown.borrow() {
-                return Ok(());
-            }
-            let session_state = state.clone();
-            let api = Arc::clone(&api);
-            let shutdown_rx = shutdown.clone();
-            let result = socket::run_socket(
-                Arc::clone(&api),
-                move |event| {
-                    let state = session_state.clone();
-                    let api = Arc::clone(&api);
-                    tokio::spawn(async move {
-                        if let Err(error) = handle_event(&state, api.as_ref(), event).await {
-                            tracing::warn!(error = format!("{error:#?}"), "slack event failed");
-                        }
-                    });
-                },
-                shutdown_rx,
-            )
-            .await;
-            match result {
-                Ok(()) => return Ok(()),
+            let on_event = |event| {
+                let state = state.clone();
+                let api = Arc::clone(&self.api);
+                tokio::spawn(async move {
+                    if let Err(error) = handle_event(&state, api.as_ref(), event).await {
+                        tracing::warn!(error = format!("{error:#?}"), "slack event failed");
+                    }
+                });
+            };
+            let ended = tokio::select! {
+                () = stopped(&mut shutdown) => return,
+                ended = self.session(&mut backoff, on_event) => ended,
+            };
+            let delay = match ended {
+                Ok(()) => continue,
                 Err(error) => {
                     tracing::warn!(error = format!("{error:#?}"), "slack socket reconnecting");
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
+                    backoff.next_delay()
                 }
+            };
+            tokio::select! {
+                () = stopped(&mut shutdown) => return,
+                () = tokio::time::sleep(delay) => {}
             }
         }
     }
+
+    async fn session(
+        &self,
+        backoff: &mut Backoff,
+        on_event: impl FnMut(Value) + Send,
+    ) -> eros::Result<()> {
+        let url = self.api.open_connection().await?;
+        let connection = self.connector.connect(&url).await?;
+        socket::run_session(connection, backoff, on_event).await
+    }
+}
+
+async fn stopped(shutdown: &mut watch::Receiver<bool>) {
+    // An `Err` means the sender is gone, which also stops the bot.
+    let _ = shutdown.wait_for(|stop| *stop).await;
 }
 
 pub(crate) async fn handle_event(

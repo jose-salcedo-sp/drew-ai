@@ -53,5 +53,7 @@ eros = "0.8.1"
 
 [dev-dependencies]
 http-body-util = "0.1.5"
+# Paused time, so timeout and backoff tests run without real sleeps.
+tokio = { version = "1.53.2", features = ["test-util"] }
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"

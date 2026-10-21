@@ -88,11 +88,7 @@ pub async fn run(args: Args) -> eros::Result<()> {
     if let Some(bot) = crate::slack::Bot::from_args(&args.slack)? {
         let shutdown = shutdown_handle();
         let bot_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = bot.run(bot_state, shutdown).await {
-                tracing::error!(error = format!("{error:#?}"), "slack bot stopped");
-            }
-        });
+        tokio::spawn(bot.run(bot_state, shutdown));
     }
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
