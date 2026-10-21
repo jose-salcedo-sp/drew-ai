@@ -4,13 +4,14 @@
 
 ## Done
 
-Work is done when all four pass with the database running (`docker compose up -d --wait db`):
+Work is done when all five pass with the database running (`docker compose up -d --wait db`):
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo nextest run
 cargo test --doc
+cargo audit
 ```
 
 Tests run under [cargo-nextest](https://nexte.st), configured in `.config/nextest.toml`. It does not run doctests, and the `compile_fail` doctests are what prove invalid pipelines do not compile, so `cargo test --doc` stays.
