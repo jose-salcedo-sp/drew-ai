@@ -8,10 +8,13 @@ pub mod socket;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use serde_json::Value;
-use tokio::sync::watch;
+use tokio::{
+    sync::{Semaphore, watch},
+    task::{JoinError, JoinSet},
+};
 
 use crate::{
     domain::{Question, UserId},
@@ -57,23 +60,22 @@ impl Bot {
         Self { api, connector }
     }
 
-    /// Reconnects until `shutdown` turns true or its sender is dropped.
+    /// Reconnects until `shutdown` turns true or its sender is dropped, then waits up to
+    /// `DRAIN_TIMEOUT` for in-flight events.
     pub async fn run(self, state: AppState, mut shutdown: watch::Receiver<bool>) {
+        let mut events = EventTasks::new(MAX_CONCURRENT_EVENTS);
         let mut backoff = Backoff::default();
         loop {
             let on_event = |event| {
                 let state = state.clone();
                 let api = Arc::clone(&self.api);
-                tokio::spawn(async move {
-                    if let Err(error) = handle_event(&state, api.as_ref(), event).await {
-                        tracing::warn!(error = format!("{error:#?}"), "slack event failed");
-                    }
-                });
+                events.spawn(async move { handle_event(&state, api.as_ref(), event).await });
             };
             let ended = tokio::select! {
-                () = stopped(&mut shutdown) => return,
+                () = stopped(&mut shutdown) => break,
                 ended = self.session(&mut backoff, on_event) => ended,
             };
+            events.reap();
             let delay = match ended {
                 Ok(()) => continue,
                 Err(error) => {
@@ -82,10 +84,11 @@ impl Bot {
                 }
             };
             tokio::select! {
-                () = stopped(&mut shutdown) => return,
+                () = stopped(&mut shutdown) => break,
                 () = tokio::time::sleep(delay) => {}
             }
         }
+        events.drain(DRAIN_TIMEOUT).await;
     }
 
     async fn session(
@@ -102,6 +105,70 @@ impl Bot {
 async fn stopped(shutdown: &mut watch::Receiver<bool>) {
     // An `Err` means the sender is gone, which also stops the bot.
     let _ = shutdown.wait_for(|stop| *stop).await;
+}
+
+/// Each event runs a whole pipeline, which shares the database pool with the HTTP API.
+const MAX_CONCURRENT_EVENTS: usize = 4;
+/// Fits, with the HTTP drain alongside it, in Kubernetes' default 30 s termination grace period.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Event tasks: every one is tracked, and at most `limit` run at once while the rest wait.
+struct EventTasks {
+    tasks: JoinSet<eros::Result<()>>,
+    permits: Arc<Semaphore>,
+}
+
+impl EventTasks {
+    fn new(limit: usize) -> Self {
+        Self {
+            tasks: JoinSet::new(),
+            permits: Arc::new(Semaphore::new(limit)),
+        }
+    }
+
+    fn spawn(&mut self, task: impl Future<Output = eros::Result<()>> + Send + 'static) {
+        self.reap();
+        let permits = Arc::clone(&self.permits);
+        self.tasks.spawn(async move {
+            let _permit = permits
+                .acquire_owned()
+                .await
+                .expect("the event semaphore is never closed");
+            task.await
+        });
+    }
+
+    fn reap(&mut self) {
+        while let Some(finished) = self.tasks.try_join_next() {
+            report(finished);
+        }
+    }
+
+    async fn drain(mut self, within: Duration) {
+        let all_done = async {
+            while let Some(finished) = self.tasks.join_next().await {
+                report(finished);
+            }
+        };
+        if tokio::time::timeout(within, all_done).await.is_err() {
+            tracing::warn!(
+                abandoned = self.tasks.len(),
+                "slack events still running at shutdown were abandoned after {within:?}"
+            );
+            self.tasks.abort_all();
+        }
+    }
+}
+
+fn report(finished: Result<eros::Result<()>, JoinError>) {
+    match finished {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(error = format!("{error:#?}"), "slack event failed"),
+        Err(error) if error.is_panic() => {
+            tracing::error!(error = format!("{error:#?}"), "slack event task panicked");
+        }
+        Err(error) => tracing::warn!(error = format!("{error:#?}"), "slack event task cancelled"),
+    }
 }
 
 pub(crate) async fn handle_event(

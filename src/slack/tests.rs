@@ -184,17 +184,25 @@ async fn an_unsaved_run_posts_only_its_id_and_logs_the_error() {
 }
 
 mod socket {
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
+    use async_trait::async_trait;
     use futures::{Sink, SinkExt, Stream, StreamExt};
     use serde_json::json;
     use tokio::{sync::watch, time::Instant};
     use tokio_tungstenite::tungstenite::{self, Message};
 
     use super::*;
-    use crate::slack::{
-        fakes::{FakeSocket, connection_pair},
-        socket::{Backoff, Connector, IDLE_TIMEOUT, WebSocketConnector, run_session},
+    use crate::{
+        pipeline::report::RunReport,
+        slack::{
+            DRAIN_TIMEOUT, MAX_CONCURRENT_EVENTS,
+            fakes::{FakeSocket, connection_pair},
+            socket::{Backoff, Connector, IDLE_TIMEOUT, WebSocketConnector, run_session},
+        },
     };
 
     fn envelope(json: &serde_json::Value) -> Message {
@@ -390,6 +398,151 @@ mod socket {
         // Refused twice (waits 1 s, 2 s), then a healthy session Slack ends: reconnect at once.
         // The next refusal waits `INITIAL` again instead of 4 s.
         assert_eq!(offsets, [0, 1, 3, 3, 4]);
+    }
+
+    /// Answers after `delay`, recording the most answers running at once.
+    struct SlowAnswerer {
+        delay: Duration,
+        running: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl SlowAnswerer {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                running: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Answerer for SlowAnswerer {
+        async fn answer(&self, question: Question) -> RunReport {
+            let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.running.fetch_sub(1, Ordering::SeqCst);
+            CannedAnswerer {
+                category: Some(CategoryKind::Boolean),
+                outcome: answered(),
+            }
+            .answer(question)
+            .await
+        }
+    }
+
+    struct PanickingAnswerer;
+
+    #[async_trait]
+    impl Answerer for PanickingAnswerer {
+        async fn answer(&self, _: Question) -> RunReport {
+            panic!("answerer bug")
+        }
+    }
+
+    /// Runs the bot over one session that delivers `events`, and asks it to stop after `stop_after`.
+    /// Returns the fake Web API and how long `Bot::run` took.
+    async fn serve_events(
+        answerer: Arc<dyn Answerer>,
+        events: &[serde_json::Value],
+        stop_after: Duration,
+    ) -> (Arc<FakeSlack>, Duration) {
+        let socket = Arc::new(FakeSocket::default());
+        let mut slack_end = socket.accept().await;
+        slack_end.send(hello()).await.unwrap();
+        for (i, event) in events.iter().enumerate() {
+            slack_end
+                .send(envelope(&json!({
+                    "type": "events_api",
+                    "envelope_id": format!("E{i}"),
+                    "payload": { "event": event },
+                })))
+                .await
+                .unwrap();
+        }
+        let slack = Arc::new(FakeSlack::default());
+        let bot = Bot::new(Arc::<FakeSlack>::clone(&slack), socket);
+        let (stop, shutdown) = watch::channel(false);
+        let started = Instant::now();
+        tokio::join!(
+            bot.run(
+                state(answerer, Arc::new(MemoryRunStore::default())),
+                shutdown
+            ),
+            async {
+                tokio::time::sleep(stop_after).await;
+                stop.send(true).unwrap();
+            }
+        );
+        (slack, started.elapsed())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn at_most_the_limit_of_events_run_at_once() {
+        let answerer = Arc::new(SlowAnswerer::new(Duration::from_secs(5)));
+        let events = vec![mention(); 3 * MAX_CONCURRENT_EVENTS];
+        let (slack, _) = serve_events(
+            Arc::<SlowAnswerer>::clone(&answerer),
+            &events,
+            Duration::from_secs(50),
+        )
+        .await;
+        assert_eq!(answerer.peak.load(Ordering::SeqCst), MAX_CONCURRENT_EVENTS);
+        assert_eq!(slack.updates.lock().unwrap().len(), events.len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_in_flight_events() {
+        let answer_takes = Duration::from_secs(10);
+        let (slack, ran) = serve_events(
+            Arc::new(SlowAnswerer::new(answer_takes)),
+            &[mention()],
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(slack.updates.lock().unwrap().len(), 1);
+        assert!(
+            ran >= answer_takes && ran < answer_takes + Duration::from_secs(1),
+            "{ran:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_abandons_events_still_running_after_the_drain_timeout() {
+        let (logs, _guard) = Logs::capture();
+        let stop_after = Duration::from_secs(1);
+        let (slack, ran) = serve_events(
+            Arc::new(SlowAnswerer::new(Duration::from_secs(3600))),
+            &[mention()],
+            stop_after,
+        )
+        .await;
+        assert!(slack.updates.lock().unwrap().is_empty());
+        let deadline = stop_after + DRAIN_TIMEOUT;
+        assert!(
+            ran >= deadline && ran < deadline + Duration::from_secs(1),
+            "{ran:?}"
+        );
+        assert!(logs.text().contains("abandoned=1"), "{}", logs.text());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn event_panics_and_errors_reach_the_log() {
+        let (logs, _guard) = Logs::capture();
+        let no_user = json!({ "type": "app_mention", "text": "hi", "channel": "C1" });
+        serve_events(
+            Arc::new(PanickingAnswerer),
+            &[mention(), no_user],
+            Duration::from_secs(5),
+        )
+        .await;
+        let logs = logs.text();
+        assert!(logs.contains("slack event task panicked"), "{logs}");
+        assert!(logs.contains("answerer bug"), "{logs}");
+        assert!(logs.contains("slack event failed"), "{logs}");
+        assert!(logs.contains("event missing user"), "{logs}");
     }
 }
 
