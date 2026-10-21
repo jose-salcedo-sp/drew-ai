@@ -11,6 +11,7 @@ use super::{Explained, ExplainedVerdict, Reranked};
 pub struct Verify<TCategory>(PhantomData<TCategory>);
 
 impl<TCategory> Verify<TCategory> {
+    /// Verify has no settings or clients.
     pub fn new() -> Self {
         Self(PhantomData)
     }
@@ -29,6 +30,7 @@ pub struct Verified {
 }
 
 impl Verified {
+    /// The answer, and the sources it was checked against.
     pub fn into_parts(self) -> (VerifiedAnswer, Reranked) {
         (self.answer, self.sources)
     }
@@ -48,24 +50,29 @@ pub struct VerifiedVerdict {
 }
 
 impl VerifiedVerdict {
+    /// System One's verdict.
     pub fn yes(&self) -> bool {
         self.yes
     }
 
+    /// Probability of the verdict given, so at least `0.5`.
     pub fn confidence(&self) -> Probability {
         self.confidence
     }
 
+    /// The verified explanation, without the verdict.
     pub fn into_verified(self) -> Verified {
         self.verified
     }
 }
 
 impl VerifiedAnswer {
+    /// In the model's order; each cites at least one of the run's chunks.
     pub fn claims(&self) -> &[Cited<String>] {
         &self.claims
     }
 
+    /// See [`VerifiedAnswer::claims`].
     pub fn into_claims(self) -> Vec<Cited<String>> {
         self.claims
     }

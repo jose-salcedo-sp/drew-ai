@@ -10,11 +10,14 @@ use crate::{
 
 use super::{Candidates, ranked};
 
+/// Runs the [`Retriever`] on the question, in parallel with `Classify`. Declines with
+/// [`DeclineReason::NoSources`] when it returns nothing.
 pub struct Retrieve {
     retriever: Arc<dyn Retriever>,
 }
 
 impl Retrieve {
+    /// Wraps the retriever.
     pub fn new(retriever: Arc<dyn Retriever>) -> Self {
         Self { retriever }
     }

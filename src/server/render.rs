@@ -8,8 +8,10 @@ use crate::{
     pipeline::report::{Answer, Citation, Verdict},
 };
 
+/// The fixed decline message, shown whatever the decline reason.
 pub const DECLINED: &str = "Can't answer with certainty.";
 
+/// The answer in its category's format: verdict first, then the why with `[n]` markers, then the numbered sources.
 pub fn answer(answer: &Answer) -> String {
     let markers = Markers(&answer.citations);
     let mut blocks = Vec::new();
@@ -67,6 +69,7 @@ pub fn answer(answer: &Answer) -> String {
     blocks.join("\n\n")
 }
 
+/// [`DECLINED`], followed by the closest sources when there are any.
 pub fn declined(sources_ranked: &[Citation]) -> String {
     if sources_ranked.is_empty() {
         return DECLINED.into();

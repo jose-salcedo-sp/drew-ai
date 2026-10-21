@@ -57,6 +57,7 @@ impl Default for HybridConfig {
     Models(std::slice::from_ref(.expected))
 )]
 pub struct EmbeddingModelMismatch {
+    /// The query embedder's model.
     pub expected: ModelRef,
     /// The first and last distinct models among current chunks (one entry when the corpus is uniform).
     pub found: Vec<ModelRef>,
@@ -76,13 +77,18 @@ impl fmt::Display for Models<'_> {
     }
 }
 
+/// The production [`Retriever`]. Each retrieval first checks that every current chunk uses `embedder`'s model.
 pub struct HybridRetriever {
+    /// Pool with migrations applied.
     pub pool: PgPool,
+    /// Embeds the query; must be the model the corpus was ingested with.
     pub embedder: Arc<dyn Embedder>,
+    /// Candidate counts and fusion constants.
     pub config: HybridConfig,
 }
 
 impl HybridRetriever {
+    /// See the field docs.
     pub fn new(pool: PgPool, embedder: Arc<dyn Embedder>, config: HybridConfig) -> Self {
         Self {
             pool,

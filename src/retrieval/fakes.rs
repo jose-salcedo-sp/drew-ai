@@ -9,6 +9,7 @@ use super::{Relevance, Retrieved, Retriever};
 /// Ranks every chunk by the fraction of query words it contains, ties by chunk id. Like the vector side of
 /// `HybridRetriever`, it keeps chunks that share no word: judging relevance is Rerank's job.
 pub struct KeywordRetriever {
+    /// The corpus; every chunk is returned on each retrieval.
     pub chunks: Vec<Chunk>,
 }
 

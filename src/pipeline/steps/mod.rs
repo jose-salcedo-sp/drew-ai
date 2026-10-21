@@ -26,6 +26,7 @@ use super::{Open, Seq, trace::RankedChunk};
 /// Kev's smaller models are validated to 8,192 tokens; longer text is judged on its beginning.
 const MAX_STATE_CHARS: usize = 16_000;
 
+/// The LLM explains from the reranked sources, Verify checks the citations. The `open` pipeline after `Rerank`.
 pub type OpenEnded = Seq<Explain<Open>, Verify<Open>>;
 /// System One decides, the LLM explains, Verify checks the citations. Only `Decisive<Boolean>` is a `Pipeline` so far.
 pub type Decisive<TCategory> = Seq<Answer<TCategory>, Seq<Explain<TCategory>, Verify<TCategory>>>;
@@ -39,6 +40,7 @@ pub struct Candidates(AtLeastOne<Retrieved>);
 pub struct Reranked(Vec<Retrieved>);
 
 impl Reranked {
+    /// Each kept match followed by its context chunks, matches best first. May be empty.
     pub fn sources(&self) -> &[Retrieved] {
         &self.0
     }

@@ -19,6 +19,7 @@ use super::{AppState, error::ApiError};
 pub struct ApiKeys(HashMap<[u8; 32], UserId>);
 
 impl ApiKeys {
+    /// The user a bearer key maps to; `None` for an unknown key.
     pub fn user(&self, key: &str) -> Option<&UserId> {
         self.0.get(&digest(key))
     }
@@ -39,6 +40,7 @@ impl fmt::Debug for ApiKeys {
 pub struct AdminUsers(HashSet<UserId>);
 
 impl AdminUsers {
+    /// Whether `user` may read runs of other users.
     pub fn contains(&self, user: &UserId) -> bool {
         self.0.contains(user)
     }

@@ -27,17 +27,23 @@ impl std::ops::AddAssign for Stored {
     }
 }
 
+/// Writes chunk versions; cheap to clone (shares the pool).
 #[derive(Clone)]
 pub struct ChunkStore {
     pool: PgPool,
 }
 
 impl ChunkStore {
+    /// Wraps a pool whose migrations have run.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
     /// Makes the document's drafts its current chunks, embedding only drafts whose version is not already stored.
+    ///
+    /// # Errors
+    ///
+    /// When two drafts share a locator, embedding fails or returns the wrong count or dimension, or a query fails.
     pub async fn store(
         &self,
         document: &Document,
@@ -224,7 +230,11 @@ impl ChunkStore {
         })
     }
 
-    /// Distinct embedding models among current chunks.
+    /// Distinct embedding models among current chunks, sorted by id then version.
+    ///
+    /// # Errors
+    ///
+    /// When the query fails.
     pub async fn current_embedding_models(&self) -> eros::Result<Vec<ModelRef>, (sqlx::Error,)> {
         Ok(sqlx::query_as::<_, (String, String)>(
             "SELECT DISTINCT embedding_model, embedding_model_version FROM chunks
@@ -238,6 +248,10 @@ impl ChunkStore {
     }
 
     /// Supersedes every current chunk embedded with a model other than `model`. Returns how many.
+    ///
+    /// # Errors
+    ///
+    /// When the query fails.
     pub async fn supersede_other_models(
         &self,
         model: &ModelRef,
@@ -254,7 +268,11 @@ impl ChunkStore {
         .rows_affected())
     }
 
-    /// Supersedes current chunks of documents for `source` whose ids are not in `present`.
+    /// Supersedes current chunks of documents for `source` whose ids are not in `present`. Returns how many.
+    ///
+    /// # Errors
+    ///
+    /// When the query fails.
     pub async fn supersede_missing_documents(
         &self,
         source: SourceKind,

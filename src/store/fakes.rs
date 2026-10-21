@@ -13,6 +13,7 @@ use crate::{
 
 use super::{RunStore, StoredRun};
 
+/// Keeps runs in a map; like the Postgres store, rejects a second save of the same run id.
 #[derive(Default)]
 pub struct MemoryRunStore {
     runs: Mutex<HashMap<RunId, StoredRun>>,
@@ -61,6 +62,7 @@ impl RunStore for FailingRunStore {
 }
 
 impl MemoryRunStore {
+    /// Every saved run, in no particular order.
     pub fn stored(&self) -> Vec<StoredRun> {
         self.runs
             .lock()

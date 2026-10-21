@@ -1,3 +1,5 @@
+//! Hybrid retrieval against Postgres.
+
 #![allow(
     clippy::unwrap_used,
     reason = "integration-test helpers; clippy exempts only #[test] functions"

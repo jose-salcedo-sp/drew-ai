@@ -23,6 +23,7 @@ const CONCURRENT_CALLS: usize = 8;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which embedding model to use and where it is served.
 #[derive(Clone, Debug, clap::Args)]
 pub struct EmbedArgs {
     /// Embedding model. On Bedrock: Titan Text Embeddings v2 or Cohere Embed v3, with region and credentials from the
@@ -38,14 +39,21 @@ pub struct EmbedArgs {
     pub embed_url: Option<String>,
 }
 
+/// The Bedrock embedding models whose request and response shapes this adapter knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
+    /// Titan Text Embeddings v2: one text per call, 1024 dimensions, normalized.
     TitanV2,
+    /// Cohere Embed v3: up to 96 texts per call; distinguishes documents from queries.
     CohereV3,
 }
 
 impl Family {
     /// Accepts plain model ids and cross-region inference profile ids (`us.cohere.embed-english-v3`).
+    ///
+    /// # Errors
+    ///
+    /// When the id names neither family.
     pub fn of(model_id: &str) -> eros::Result<Self> {
         if model_id.contains("amazon.titan-embed-text-v2") {
             Ok(Self::TitanV2)
@@ -70,10 +78,13 @@ impl Family {
 /// One `InvokeModel` call: its JSON body and how many embeddings it returns.
 #[derive(Debug, PartialEq)]
 pub struct Request {
+    /// The `InvokeModel` body.
     pub body: Value,
+    /// Texts in this call.
     pub count: usize,
 }
 
+/// Splits `texts` into calls in input order, truncating each text to the family's character limit.
 pub fn requests(family: Family, texts: &[String], purpose: EmbedPurpose) -> Vec<Request> {
     match family {
         Family::TitanV2 => texts
@@ -110,6 +121,11 @@ pub fn requests(family: Family, texts: &[String], purpose: EmbedPurpose) -> Vec<
     }
 }
 
+/// The vectors of one call's response body.
+///
+/// # Errors
+///
+/// When the body does not parse, or holds other than `count` vectors of [`EMBEDDING_DIM`].
 pub fn parse_response(family: Family, body: &[u8], count: usize) -> eros::Result<Vec<Vec<f32>>> {
     #[derive(Deserialize)]
     struct Titan {
@@ -151,6 +167,8 @@ fn truncate(text: &str, max_chars: usize) -> &str {
     }
 }
 
+/// [`Embedder`] over `InvokeModel`, with up to 8 calls in flight. Its [`ModelRef::version`] records the
+/// parameters that shape the vectors.
 pub struct BedrockEmbedder {
     client: Client,
     model_id: String,
@@ -158,6 +176,9 @@ pub struct BedrockEmbedder {
 }
 
 impl BedrockEmbedder {
+    /// # Errors
+    ///
+    /// When `model_id` names no supported [`Family`].
     pub fn new(client: Client, model_id: impl Into<String>) -> eros::Result<Self> {
         let model_id = model_id.into();
         Ok(Self {
@@ -168,6 +189,10 @@ impl BedrockEmbedder {
     }
 
     /// Region and credentials come from the standard AWS environment and profile chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`BedrockEmbedder::new`].
     pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
         let timeouts = TimeoutConfig::builder()
             .connect_timeout(CONNECT_TIMEOUT)

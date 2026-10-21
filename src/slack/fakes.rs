@@ -9,10 +9,14 @@ use super::{
     socket::{Connection, Connector},
 };
 
+/// Records every post and update and hands out a fixed WebSocket URL.
 #[derive(Default)]
 pub struct FakeSlack {
+    /// `(channel, thread_ts, text)` per post, in order.
     pub posts: Mutex<Vec<(String, Option<String>, String)>>,
+    /// `(channel, ts, text)` per update, in order.
     pub updates: Mutex<Vec<(String, String, String)>>,
+    /// Returned by every `open_connection`.
     pub ws_url: String,
 }
 

@@ -1,3 +1,5 @@
+//! Ingest a page, then ask about it over HTTP, against a real Postgres and fake models.
+
 #![allow(
     clippy::unwrap_used,
     reason = "integration-test helpers; clippy exempts only #[test] functions"

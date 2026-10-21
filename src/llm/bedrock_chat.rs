@@ -26,6 +26,7 @@ const RESPOND_TOOL: &str = "respond";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which model `Explain` uses and where it is served.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ChatArgs {
     /// Model for `Explain`: a Bedrock model or inference profile id, e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
@@ -37,12 +38,14 @@ pub struct ChatArgs {
     pub explain_url: Option<String>,
 }
 
+/// [`ChatModel`] over the Converse API. A request with a `json_schema` forces a tool call whose input is the reply.
 pub struct BedrockChat {
     client: Client,
     model_id: String,
 }
 
 impl BedrockChat {
+    /// `model_id` is a Bedrock model or inference profile id; it already carries its version.
     pub fn new(client: Client, model_id: impl Into<String>) -> Self {
         Self {
             client,

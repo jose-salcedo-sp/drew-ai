@@ -8,6 +8,7 @@ use crate::{
     },
 };
 
+/// Recorded as the trace entry's prompt version; bump on any change to the question or its options.
 pub const CLASSIFY_PROMPT_VERSION: &str = "classify-v1";
 
 const QUESTION_ID: &str = "category";
@@ -38,6 +39,7 @@ pub struct Classify {
 }
 
 impl Classify {
+    /// `None` classifies every question as `open`, unscored.
     pub fn new(system_one: Option<Arc<dyn SystemOne>>) -> Self {
         Self {
             system_one,
@@ -45,6 +47,7 @@ impl Classify {
         }
     }
 
+    /// Sets the probability below which a decisive category falls back to `open`; `None` never falls back.
     pub fn with_min_confidence(self, min_confidence: Option<Probability>) -> Self {
         Self {
             min_confidence,

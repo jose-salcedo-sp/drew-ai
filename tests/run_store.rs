@@ -1,3 +1,5 @@
+//! Runs persisted in Postgres through the HTTP API.
+
 #![allow(
     clippy::unwrap_used,
     reason = "integration-test helpers; clippy exempts only #[test] functions"

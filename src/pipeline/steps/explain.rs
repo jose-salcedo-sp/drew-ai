@@ -14,6 +14,7 @@ use super::{Decided, Reranked};
 
 /// Bump on any change to `SYSTEM`, `prompt`, or `schema`, so traces and eval can tell prompts apart.
 pub const PROMPT_VERSION: &str = "explain-open-v3";
+/// The prompt version for explaining a yes/no verdict; bump with the same rule as [`PROMPT_VERSION`].
 pub const BOOLEAN_PROMPT_VERSION: &str = "explain-boolean-v2";
 
 const MAX_TOKENS: u32 = 2048;
@@ -52,6 +53,7 @@ pub struct Explain<TCategory> {
 }
 
 impl<TCategory> Explain<TCategory> {
+    /// `chat` is the "why" LLM.
     pub fn new(chat: Arc<dyn ChatModel>) -> Self {
         Self {
             chat,
@@ -148,13 +150,16 @@ pub struct Explanation {
 }
 
 impl Explanation {
+    /// In the order the model wrote them; never empty.
     pub fn claims(&self) -> &[Claim] {
         &self.claims
     }
 }
 
+/// One claim of an [`Explanation`], with the chunk ids the model cited for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Claim {
+    /// Trimmed and non-empty.
     pub text: String,
     /// Deduplicated, in the order the model cited them.
     pub chunks: Vec<ChunkId>,
@@ -174,12 +179,17 @@ struct RawClaim {
     chunk_ids: Vec<String>,
 }
 
+/// Why the model's JSON did not convert into an [`Explanation`]; `Explain` declines with it. Claim numbers count
+/// from 1.
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum InvalidExplanation {
+    /// An empty claims list.
     #[error("the explanation has no claims")]
     NoClaims,
+    /// A claim whose text is blank.
     #[error("claim {0} has no text")]
     BlankClaim(usize),
+    /// A claim citing a blank chunk id.
     #[error("claim {0} cites a blank chunk id")]
     BlankChunkId(usize),
 }

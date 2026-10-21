@@ -6,6 +6,13 @@ rust-version = "1.99"
 
 [lints.rust]
 unsafe_code = "forbid"
+# Every public item says what its type cannot: units, invariants, errors, which step builds it.
+missing_docs = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "deny"
 
 [lints.clippy]
 # `Halted` carries the whole trace by design; halting is the rare path.

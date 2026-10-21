@@ -12,6 +12,7 @@ use crate::domain::{NotAProbability, Probability};
 
 use super::ModelRef;
 
+/// Where the System One server is.
 #[derive(Clone, Debug, clap::Args)]
 #[group(id = "system_one")]
 pub struct SystemOneArgs {
@@ -26,28 +27,38 @@ pub struct SystemOneArgs {
     pub system_one_key: Option<String>,
 }
 
+/// One `POST /v1/systemone` call: several questions over one text.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DecisionRequest {
     /// The text every question is asked about.
     pub state: String,
+    /// Overwritten with the configured model name when sent.
     pub model: String,
     /// Keyed by an id the model never sees.
     pub questions: BTreeMap<String, Decision>,
 }
 
+/// One question, and the kind of answer it takes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Decision {
     /// Yes or no.
-    Noul { instructions: String },
+    Noul {
+        /// The question, phrased for a yes/no answer.
+        instructions: String,
+    },
     /// One of the options, each with an optional description.
     Choice {
+        /// The question.
         instructions: String,
+        /// The options.
         criteria: Options,
     },
     /// Levels ordered from lowest to highest.
     Score {
+        /// The question.
         instructions: String,
+        /// Level names, lowest first.
         criteria: Vec<String>,
     },
 }
@@ -70,23 +81,35 @@ impl Serialize for Options {
 /// `0..=1`, so one bad answer declines its step instead of failing the whole response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DecisionResponse {
+    /// Keyed by the request's question ids.
     pub answers: BTreeMap<String, DecisionAnswer>,
 }
 
+/// The answer to one [`Decision`], of the same kind. Probabilities are unchecked here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DecisionAnswer {
-    /// Probability of yes.
-    Noul { noul: f32 },
+    /// Answer to [`Decision::Noul`].
+    Noul {
+        /// Probability of yes.
+        noul: f32,
+    },
+    /// Answer to [`Decision::Choice`].
     Choice {
+        /// The most probable option.
         choice: String,
+        /// The model's confidence in `choice`.
         confidence: f32,
+        /// Probability per option.
         probabilities: BTreeMap<String, f32>,
     },
+    /// Answer to [`Decision::Score`].
     Score {
         /// Mean level index, from 0.
         score: f32,
+        /// The model's confidence in the score.
         confidence: f32,
+        /// Probability per level.
         probabilities: BTreeMap<String, f32>,
     },
 }
@@ -94,13 +117,29 @@ pub enum DecisionAnswer {
 /// An answer that is not the kind asked for, or whose probability is not one.
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum InvalidAnswer {
+    /// The answer is missing or of another kind.
     #[error("expected a {expected} answer for {id:?}")]
-    Unexpected { id: String, expected: &'static str },
+    Unexpected {
+        /// Question id.
+        id: String,
+        /// The kind asked for.
+        expected: &'static str,
+    },
+    /// The chosen option has no entry in `probabilities`.
     #[error("no probability for {choice:?} in the answer for {id:?}")]
-    NoProbability { id: String, choice: String },
+    NoProbability {
+        /// Question id.
+        id: String,
+        /// The chosen option.
+        choice: String,
+    },
+    /// The probability is outside `0..=1` or `NaN`.
     #[error("answer for {id:?}: {source}")]
     OutOfRange {
+        /// Question id.
         id: String,
+        /// The rejected value.
+
         #[source]
         source: NotAProbability,
     },
@@ -108,6 +147,10 @@ pub enum InvalidAnswer {
 
 impl DecisionResponse {
     /// The probability of yes for the yes/no question `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidAnswer::Unexpected`] or [`InvalidAnswer::OutOfRange`].
     pub fn yes_no(&self, id: &str) -> Result<Probability, InvalidAnswer> {
         match self.answers.get(id) {
             Some(DecisionAnswer::Noul { noul }) => probability(id, *noul),
@@ -119,6 +162,10 @@ impl DecisionResponse {
     }
 
     /// The option chosen for the choice question `id`, and the probability given to it.
+    ///
+    /// # Errors
+    ///
+    /// Any [`InvalidAnswer`].
     pub fn choice(&self, id: &str) -> Result<(&str, Probability), InvalidAnswer> {
         let Some(DecisionAnswer::Choice {
             choice,
@@ -148,13 +195,23 @@ fn probability(id: &str, value: f32) -> Result<Probability, InvalidAnswer> {
     })
 }
 
+/// The "what" model: answers [`Decision`]s with calibrated probabilities. It only picks among options it is
+/// given, so it cannot invent one.
 #[async_trait]
 pub trait SystemOne: Send + Sync {
+    /// Recorded in the trace.
     fn model(&self) -> ModelRef;
 
+    /// Answers every question in `request`.
+    ///
+    /// # Errors
+    ///
+    /// When the server fails, times out, or returns a body that does not parse. Out-of-range probabilities do not
+    /// fail here; see [`DecisionResponse`].
     async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse>;
 }
 
+/// [`SystemOne`] over HTTP, with a 120 s request timeout.
 pub struct HttpSystemOne {
     client: reqwest::Client,
     url: String,

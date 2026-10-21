@@ -11,12 +11,18 @@ use crate::domain::RunId;
 
 use super::openai::Drew;
 
+/// An error response. Messages are fixed text for users; internal detail goes to the log and the stored run.
 #[derive(Debug)]
 pub struct ApiError {
+    /// HTTP status; `401` also sets `WWW-Authenticate: Bearer`.
     pub status: StatusCode,
+    /// Shown to the caller.
     pub message: String,
+    /// OpenAI's `error.type`, e.g. `invalid_request_error`.
     pub kind: &'static str,
+    /// OpenAI's `error.code`, e.g. `run_failed`.
     pub code: &'static str,
+    /// The run the error belongs to, so the caller can look it up.
     pub run_id: Option<RunId>,
     /// Attached when a persisted run failed, so the caller sees its trace.
     pub drew: Option<Box<Drew>>,
@@ -34,6 +40,7 @@ impl ApiError {
         }
     }
 
+    /// `401`, code `invalid_api_key`.
     pub fn unauthorized(message: &str) -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,
@@ -43,6 +50,7 @@ impl ApiError {
         )
     }
 
+    /// `400`, code `invalid_request`.
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
@@ -52,6 +60,7 @@ impl ApiError {
         )
     }
 
+    /// `404`, code `not_found`.
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::NOT_FOUND,
@@ -61,6 +70,7 @@ impl ApiError {
         )
     }
 
+    /// `500` with the given code.
     pub fn internal(code: &'static str, message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -70,6 +80,7 @@ impl ApiError {
         )
     }
 
+    /// Sets [`ApiError::run_id`].
     pub fn with_run(self, run_id: RunId) -> Self {
         Self {
             run_id: Some(run_id),
@@ -77,6 +88,7 @@ impl ApiError {
         }
     }
 
+    /// Sets [`ApiError::drew`].
     pub fn with_drew(self, drew: Drew) -> Self {
         Self {
             drew: Some(Box::new(drew)),
