@@ -1,3 +1,5 @@
+//! The `drew` binary: parses the command line and runs `serve`, `ingest` or `eval` from the library.
+
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};

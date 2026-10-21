@@ -1,3 +1,5 @@
+//! Schema constraints: check constraints accept every domain enum variant, and a chunk has one current version.
+
 #![allow(
     clippy::unwrap_used,
     reason = "integration-test helpers; clippy exempts only #[test] functions"

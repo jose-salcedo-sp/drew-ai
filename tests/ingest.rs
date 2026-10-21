@@ -1,3 +1,5 @@
+//! `drew::ingest::ingest` against Postgres: versioning, superseding, and the embedding-model check.
+
 #![allow(
     clippy::unwrap_used,
     reason = "integration-test helpers; clippy exempts only #[test] functions"
