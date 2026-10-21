@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::{
-    config::{ConfigArgs, PipelineConfig},
+    config::{ConfigArgs, PipelineConfig, StepName},
     domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
         self, ChatModel, ModelRef,
@@ -99,19 +99,19 @@ impl PipelineAnswerer {
             retrieve,
             rerank_open: Rerank::from_config(
                 &config.rerank,
-                threshold(CategoryKind::Open, "rerank"),
+                threshold(CategoryKind::Open, StepName::Rerank),
                 system_one.clone(),
             ),
             rerank_boolean: Rerank::from_config(
                 &config.rerank,
-                threshold(CategoryKind::Boolean, "rerank"),
+                threshold(CategoryKind::Boolean, StepName::Rerank),
                 system_one.clone(),
             ),
             open: Seq(Explain::new(Arc::clone(&explain)), Verify::new()),
             boolean: Seq(
                 AnswerStep::new(
                     system_one.clone(),
-                    threshold(CategoryKind::Boolean, "answer"),
+                    threshold(CategoryKind::Boolean, StepName::Answer),
                 ),
                 Seq(Explain::new(Arc::clone(&explain)), Verify::new()),
             ),

@@ -10,6 +10,7 @@ use super::{
     *,
 };
 use crate::{
+    config::{PerCategory, StepName},
     domain::{
         AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance,
         Question, RunId,
@@ -884,7 +885,7 @@ fn tuning_results() -> Results {
             vec![
                 classify(Choice, 0.8),
                 retrieve(&["a"]),
-                rerank(&["a"]),
+                rerank_with(passed(Some(0.8)), &["a"]),
                 scored("answer", passed(Some(0.4))),
             ],
         );
@@ -914,31 +915,32 @@ fn tuning_results() -> Results {
     ])
 }
 
-fn candidate(name: &str, thresholds: &[(&str, f32)]) -> Candidate {
+fn candidate(name: &str, thresholds: &[(StepName, f32)]) -> Candidate {
     Candidate {
         name: name.into(),
         thresholds: thresholds
             .iter()
-            .map(|(s, t)| ((*s).into(), probability(*t)))
+            .map(|(step, t)| (*step, probability(*t)))
             .collect(),
-        per_category: HashMap::new(),
+        per_category: PerCategory::default(),
     }
 }
 
 #[test]
 fn tuning_reapplies_thresholds_to_recorded_scores() {
     let results = tuning_results();
-    let mut lenient_choice = candidate("lenient-choice", &[("answer", 0.5)]);
-    lenient_choice.per_category.insert(
-        CategoryKind::Choice,
-        [("answer".to_owned(), probability(0.3))].into(),
-    );
+    let mut lenient_choice = candidate("lenient-choice", &[(StepName::Answer, 0.5)]);
+    lenient_choice.per_category.choice =
+        [(StepName::Answer, probability(0.3))].into_iter().collect();
     let candidates = [
         candidate("none", &[]),
-        candidate("answer-0.5", &[("answer", 0.5)]),
-        candidate("answer-0.75", &[("answer", 0.75)]),
+        candidate("answer-0.5", &[(StepName::Answer, 0.5)]),
+        candidate("answer-0.75", &[(StepName::Answer, 0.75)]),
         lenient_choice,
-        candidate("classify-0.85", &[("classify", 0.85), ("answer", 0.35)]),
+        candidate(
+            "rerank-0.85",
+            &[(StepName::Rerank, 0.85), (StepName::Answer, 0.35)],
+        ),
     ];
     let report = tune(&results, &candidates);
     let summary: Vec<_> = report
@@ -966,8 +968,8 @@ fn tuning_reapplies_thresholds_to_recorded_scores() {
             ("answer-0.5", 3, 2, 0, Some(1.0), Some(0.4), true),
             ("answer-0.75", 2, 3, 0, Some(1.0), Some(0.6), false),
             ("lenient-choice", 4, 1, 0, Some(0.75), Some(0.2), false),
-            // `wrong` falls below the classify threshold; `low` at 0.3 below answer 0.35.
-            ("classify-0.85", 3, 2, 0, Some(1.0), Some(0.4), true),
+            // `wrong` falls below the rerank threshold; `low` at 0.3 below answer 0.35.
+            ("rerank-0.85", 3, 2, 0, Some(1.0), Some(0.4), true),
         ]
     );
 
@@ -991,7 +993,7 @@ fn tuning_table_highlights_launch_gate_candidates() {
         &results,
         &[
             candidate("none", &[]),
-            candidate("answer-0.5", &[("answer", 0.5)]),
+            candidate("answer-0.5", &[(StepName::Answer, 0.5)]),
         ],
     );
     let table = report.to_string();
@@ -1015,6 +1017,50 @@ fn a_candidate_threshold_outside_zero_to_one_is_rejected() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn a_misspelled_candidate_step_or_field_is_rejected_by_name() {
+    for (bad, key) in [
+        (r#"[{"name": "x", "thresholds": {"anser": 0.7}}]"#, "anser"),
+        (
+            r#"[{"name": "x", "thresholds": {"classify": 0.7}}]"#,
+            "classify",
+        ),
+        (
+            r#"[{"name": "x", "per_category": {"boolean": {"rerankk": 0.7}}}]"#,
+            "rerankk",
+        ),
+        (
+            r#"[{"name": "x", "per_category": {"boolen": {}}}]"#,
+            "boolen",
+        ),
+        (
+            r#"[{"name": "x", "threshold": {"answer": 0.7}}]"#,
+            "threshold",
+        ),
+    ] {
+        let error = serde_json::from_str::<Vec<Candidate>>(bad)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("`{key}`")), "{error}");
+    }
+}
+
+#[test]
+fn a_candidate_round_trips_and_pastes_into_the_config() {
+    let text = r#"[{"name": "strict", "thresholds": {"answer": 0.5}, "per_category": {"choice": {"rerank": 0.25}}}]"#;
+    let candidates: Vec<Candidate> = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        serde_json::to_value(&candidates).unwrap(),
+        serde_json::from_str::<serde_json::Value>(text).unwrap()
+    );
+    let config = crate::config::PipelineConfig::parse(
+        r#"{"thresholds": {"answer": 0.5}, "per_category": {"choice": {"rerank": 0.25}}}"#,
+    )
+    .unwrap();
+    assert_eq!(config.thresholds, candidates[0].thresholds);
+    assert_eq!(config.per_category, candidates[0].per_category);
 }
 
 #[test]

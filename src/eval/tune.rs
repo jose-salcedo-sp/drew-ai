@@ -1,14 +1,12 @@
 //! Re-applies candidate thresholds to the scores recorded in each run's trace, without calling any model.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt,
-};
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{CategoryKind, Probability},
+    config::{PerCategory, StepName, Thresholds},
+    domain::CategoryKind,
     pipeline::{DeclineReason, report::Outcome, trace::StepOutcome},
 };
 
@@ -17,26 +15,16 @@ use super::metrics::{CATEGORIES, EvalRun, Metric, Results, cell, percent, scope_
 pub const MIN_ANSWERED_PRECISION: f64 = 0.95;
 pub const MAX_DECLINE_RATE: f64 = 0.40;
 
-/// One entry of the candidates file (a JSON array).
+/// One entry of the candidates file (a JSON array). `thresholds` and `per_category` are `config/drew.json`'s.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub name: String,
-    /// Step name (as recorded in the trace) to minimum score. A step not listed has no threshold.
     #[serde(default)]
-    pub thresholds: BTreeMap<String, Probability>,
+    pub thresholds: Thresholds,
     /// Overrides `thresholds` for runs the pipeline classified into that category.
     #[serde(default)]
-    pub per_category: HashMap<CategoryKind, BTreeMap<String, Probability>>,
-}
-
-impl Candidate {
-    fn threshold(&self, category: Option<CategoryKind>, step: &str) -> Option<Probability> {
-        category
-            .and_then(|category| self.per_category.get(&category))
-            .and_then(|thresholds| thresholds.get(step))
-            .or_else(|| self.thresholds.get(step))
-            .copied()
-    }
+    pub per_category: PerCategory,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,7 +81,13 @@ fn replay(run: &EvalRun, candidate: &Candidate) -> Replayed {
             } => score,
             _ => continue,
         };
-        if let Some(threshold) = candidate.threshold(report.category, &entry.step)
+        let Ok(step) = entry.step.parse::<StepName>() else {
+            continue;
+        };
+        if let Some(threshold) =
+            candidate
+                .per_category
+                .threshold(&candidate.thresholds, report.category, step)
             && *score < threshold
         {
             return Replayed::Declined { unresolved: false };
