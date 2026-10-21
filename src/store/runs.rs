@@ -34,25 +34,6 @@ pub fn status(outcome: &Outcome) -> &'static str {
     }
 }
 
-fn category_name(category: CategoryKind) -> &'static str {
-    match category {
-        CategoryKind::Boolean => "boolean",
-        CategoryKind::Choice => "choice",
-        CategoryKind::Ranking => "ranking",
-        CategoryKind::Open => "open",
-    }
-}
-
-fn parse_category(name: &str) -> eros::Result<CategoryKind> {
-    Ok(match name {
-        "boolean" => CategoryKind::Boolean,
-        "choice" => CategoryKind::Choice,
-        "ranking" => CategoryKind::Ranking,
-        "open" => CategoryKind::Open,
-        other => eros::bail!("unknown category {other:?}"),
-    })
-}
-
 #[async_trait]
 impl RunStore for PgRunStore {
     async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()> {
@@ -63,7 +44,7 @@ impl RunStore for PgRunStore {
         .bind(report.id.as_uuid())
         .bind(&user.0)
         .bind(report.question.as_str())
-        .bind(report.category.map(category_name))
+        .bind(report.category.as_ref().map(CategoryKind::as_str))
         .bind(status(&report.outcome))
         .bind(Json(&report.outcome))
         .bind(Json(&report.trace))
@@ -96,7 +77,10 @@ impl RunStore for PgRunStore {
             report: RunReport {
                 id,
                 question: Question::new(row.try_get::<String, _>("question")?),
-                category: category.as_deref().map(parse_category).transpose()?,
+                category: category
+                    .as_deref()
+                    .map(CategoryKind::try_from)
+                    .transpose()?,
                 outcome,
                 trace,
             },

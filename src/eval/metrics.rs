@@ -503,13 +503,7 @@ pub fn regressions(baseline: &Baseline, current: &MetricsReport) -> Vec<Regressi
 }
 
 pub(super) fn scope_name(category: Option<CategoryKind>) -> &'static str {
-    match category {
-        None => "overall",
-        Some(CategoryKind::Boolean) => "boolean",
-        Some(CategoryKind::Choice) => "choice",
-        Some(CategoryKind::Ranking) => "ranking",
-        Some(CategoryKind::Open) => "open",
-    }
+    category.as_ref().map_or("overall", CategoryKind::as_str)
 }
 
 pub(super) fn percent(value: Option<f64>) -> String {

@@ -7,7 +7,7 @@ use pgvector::Vector;
 use sqlx::PgPool;
 
 use crate::{
-    domain::{ChunkDraft, ChunkVersion, Document, DocumentId, Sensitivity, SourceKind},
+    domain::{ChunkDraft, ChunkVersion, Document, DocumentId, SourceKind},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef},
 };
 
@@ -209,7 +209,7 @@ impl ChunkStore {
             .bind(draft.authoritative)
             .bind(&document.labels.acl)
             .bind(&document.labels.customer)
-            .bind(sensitivity(document.labels.sensitivity))
+            .bind(document.labels.sensitivity.as_str())
             .bind(Vector::from(embedding))
             .bind(&model.id)
             .bind(&model.version)
@@ -281,13 +281,5 @@ fn embedding_input(document: &Document, draft: &ChunkDraft) -> String {
     match &draft.heading {
         Some(heading) => format!("{}\n{heading}\n\n{}", document.title, draft.text),
         None => format!("{}\n\n{}", document.title, draft.text),
-    }
-}
-
-fn sensitivity(sensitivity: Sensitivity) -> &'static str {
-    match sensitivity {
-        Sensitivity::Public => "public",
-        Sensitivity::Internal => "internal",
-        Sensitivity::Confidential => "confidential",
     }
 }

@@ -423,24 +423,16 @@ impl TryFrom<ChunkRow> for Chunk {
     type Error = eros::ErrorUnion;
 
     fn try_from(row: ChunkRow) -> eros::Result<Self> {
-        let source = match row.source.as_str() {
-            "markdown" => SourceKind::Markdown,
-            "confluence" | "jira" | "slack" => {
-                return Err(error!(
-                    "chunk {} is from legacy source {}; re-ingest the markdown corpus",
-                    row.id, row.source
-                ));
-            }
-            other => return Err(error!("chunk {} has unknown source {other:?}", row.id)),
-        };
-        let sensitivity = match row.sensitivity.as_str() {
-            "public" => Sensitivity::Public,
-            "internal" => Sensitivity::Internal,
-            "confidential" => Sensitivity::Confidential,
-            other => {
-                return Err(error!("chunk {} has unknown sensitivity {other:?}", row.id));
-            }
-        };
+        if matches!(row.source.as_str(), "confluence" | "jira" | "slack") {
+            return Err(error!(
+                "chunk {} is from legacy source {}; re-ingest the markdown corpus",
+                row.id, row.source
+            ));
+        }
+        let source = SourceKind::try_from(row.source.as_str())
+            .with_context(|| format!("chunk {}", row.id))?;
+        let sensitivity = Sensitivity::try_from(row.sensitivity.as_str())
+            .with_context(|| format!("chunk {}", row.id))?;
         Ok(Chunk {
             id: ChunkId(row.id),
             version: ChunkVersion(row.version),

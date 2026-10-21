@@ -73,6 +73,51 @@ pub enum CategoryKind {
     Open,
 }
 
+impl CategoryKind {
+    pub const ALL: [Self; 4] = [Self::Boolean, Self::Choice, Self::Ranking, Self::Open];
+
+    /// The serde name, also stored in `pipeline_runs.category`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Choice => "choice",
+            Self::Ranking => "ranking",
+            Self::Open => "open",
+        }
+    }
+}
+
+impl TryFrom<&str> for CategoryKind {
+    type Error = UnknownVariant;
+
+    fn try_from(name: &str) -> Result<Self, UnknownVariant> {
+        match name {
+            "boolean" => Ok(Self::Boolean),
+            "choice" => Ok(Self::Choice),
+            "ranking" => Ok(Self::Ranking),
+            "open" => Ok(Self::Open),
+            other => Err(UnknownVariant::new("category", other)),
+        }
+    }
+}
+
+/// A string that names no variant of a text-backed domain enum.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {kind} {name:?}")]
+pub struct UnknownVariant {
+    pub kind: &'static str,
+    pub name: String,
+}
+
+impl UnknownVariant {
+    fn new(kind: &'static str, name: &str) -> Self {
+        Self {
+            kind,
+            name: name.to_owned(),
+        }
+    }
+}
+
 /// A probability or a confidence: finite and in `0..=1`. Step scores and thresholds are compared as these, so a
 /// model's out-of-range or `NaN` output cannot pass a threshold. Serialized as a bare number.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -123,9 +168,23 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
+    pub const ALL: [Self; 1] = [Self::Markdown];
+
+    /// The serde name, also stored in `documents.source` and used as the `DocumentId` prefix.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
+        }
+    }
+}
+
+impl TryFrom<&str> for SourceKind {
+    type Error = UnknownVariant;
+
+    fn try_from(name: &str) -> Result<Self, UnknownVariant> {
+        match name {
+            "markdown" => Ok(Self::Markdown),
+            other => Err(UnknownVariant::new("source", other)),
         }
     }
 }
@@ -196,6 +255,32 @@ pub enum Sensitivity {
     Public,
     Internal,
     Confidential,
+}
+
+impl Sensitivity {
+    pub const ALL: [Self; 3] = [Self::Public, Self::Internal, Self::Confidential];
+
+    /// The serde name, also stored in `chunks.sensitivity`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Internal => "internal",
+            Self::Confidential => "confidential",
+        }
+    }
+}
+
+impl TryFrom<&str> for Sensitivity {
+    type Error = UnknownVariant;
+
+    fn try_from(name: &str) -> Result<Self, UnknownVariant> {
+        match name {
+            "public" => Ok(Self::Public),
+            "internal" => Ok(Self::Internal),
+            "confidential" => Ok(Self::Confidential),
+            other => Err(UnknownVariant::new("sensitivity", other)),
+        }
+    }
 }
 
 /// Recorded on every chunk; enforced only in the security phase.
@@ -375,6 +460,37 @@ mod tests {
         for bad in ["1.5", "-0.1", "1e39"] {
             assert!(serde_json::from_str::<Probability>(bad).is_err(), "{bad}");
         }
+    }
+
+    fn assert_text_matches_serde<T>(variants: &[T], as_str: fn(&T) -> &'static str)
+    where
+        T: Copy
+            + fmt::Debug
+            + PartialEq
+            + Serialize
+            + for<'a> TryFrom<&'a str, Error = UnknownVariant>,
+    {
+        for &variant in variants {
+            let name = as_str(&variant);
+            assert_eq!(serde_json::to_value(variant).unwrap(), name, "{variant:?}");
+            assert_eq!(T::try_from(name).unwrap(), variant);
+        }
+        assert!(T::try_from("Unknown").is_err());
+    }
+
+    #[test]
+    fn category_text_matches_serde_and_round_trips() {
+        assert_text_matches_serde(&CategoryKind::ALL, CategoryKind::as_str);
+    }
+
+    #[test]
+    fn sensitivity_text_matches_serde_and_round_trips() {
+        assert_text_matches_serde(&Sensitivity::ALL, Sensitivity::as_str);
+    }
+
+    #[test]
+    fn source_text_matches_serde_and_round_trips() {
+        assert_text_matches_serde(&SourceKind::ALL, SourceKind::as_str);
     }
 
     #[test]
