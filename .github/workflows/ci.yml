@@ -99,9 +99,16 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
 
+      # The runner disk is below mbx's free-space floor after a build, and gc then evicts the store before the
+      # target. The target is not cached, so it goes first.
       - name: mbx gc
         if: ${{ !cancelled() && steps.mbx-cache.outputs.cache-hit != 'true' }}
-        run: mbx gc && mbx cache stats
+        run: |
+          df -h "$HOME"
+          mbx clean
+          mbx gc
+          mbx cache stats
+          du -sh ~/.cache/mbx/*
 
       - name: Save mbx cache
         if: ${{ !cancelled() && steps.mbx-cache.outputs.cache-hit != 'true' }}
