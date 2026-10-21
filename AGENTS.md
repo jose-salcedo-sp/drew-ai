@@ -25,7 +25,7 @@ These files are shared between modules: `src/domain.rs`, `src/pipeline/{mod,trac
 - Queries use runtime-checked `sqlx::query` / `query_as`; the `query!` macros need a live database at compile time.
 - Migrations are new files named `YYYYMMDDHHMMSS_description.sql`. Applied migrations are immutable.
 - Database tests use `#[sqlx::test(migrator = "drew::store::MIGRATOR")]`, which gives each test its own database.
-- Every external service (Bedrock, System One, Confluence, Jira, Slack) sits behind a trait. Tests use the fakes in `*/fakes.rs` or `wiremock`, so the tests run offline with no credentials.
+- Every external service (Bedrock, System One, Slack) sits behind a trait. Tests use the fakes in `*/fakes.rs` or `wiremock`, so the tests run offline with no credentials.
   - The production adapter's client sets a connect and a request timeout, as named constants beside it (`reqwest::ClientBuilder`, AWS `TimeoutConfig`, `tokio::time::timeout` around a connect). A long-lived stream also bounds the wait for its next message. The trait is not a deadline.
   - A fake keeps its port's contract: a test that pins a port's behaviour runs against the fake and the real adapter (Postgres or `wiremock`).
 - `Step` and `Pipeline` use `impl Future + Send` for static dispatch; client traits use `#[async_trait]` so they work as `Arc<dyn Trait>`, since the backend or fake is chosen at runtime.

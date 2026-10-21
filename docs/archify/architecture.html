@@ -5167,7 +5167,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="pipeline" data-edge-to="explain_llm" data-edge-label="cited claims" data-edge-key="5" data-edge-id="explain" data-composition-points="535,320;535,174" d="M 535 320 L 535 174" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="pipeline" data-edge-to="system_one" data-edge-label="milestones 4–6" data-edge-key="6" data-edge-id="system-one" data-composition-points="542,384;542,530" d="M 542 384 L 542 530" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="eval" data-edge-to="pipeline" data-edge-label="golden questions" data-edge-key="7" data-edge-id="golden" data-composition-points="400,562;424,562;424,408;528,408;528,384" d="M 400 562 L 416 562 Q 424 562 424 554 L 424 416 Q 424 408 432 408 L 520 408 Q 528 408 528 400 L 528 384" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="sources" data-edge-to="ingest" data-edge-label="REST, changed since cursor" data-edge-key="8" data-edge-id="fetch" data-composition-points="1205,530;1205,384" d="M 1205 530 L 1205 384" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="sources" data-edge-to="ingest" data-edge-label="full snapshot" data-edge-key="8" data-edge-id="fetch" data-composition-points="1205,530;1205,384" d="M 1205 530 L 1205 384" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="ingest" data-edge-to="postgres" data-edge-label="new versions" data-edge-key="9" data-edge-id="store-chunks" data-composition-points="1130,352;1060,352" d="M 1130 352 L 1060 352" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="ingest" data-edge-to="embeddings" data-edge-label="embed" data-edge-key="10" data-edge-id="embed-chunks" data-composition-points="1205,320;1205,296;1084,296;1084,142;1060,142" d="M 1205 320 L 1205 304 Q 1205 296 1197 296 L 1092 296 Q 1084 296 1084 288 L 1084 150 Q 1084 142 1076 142 L 1060 142" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
 
@@ -5241,16 +5241,16 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="context" x="1205" y="366" class="t-muted" font-size="9" text-anchor="middle">version, embed, supersede</text>
         </g>
 
-        <g id="node-sources" data-node-id="sources" data-node-label="Sources" tabindex="0" role="button" aria-label="Focus Sources, Confluence, Jira, Slack, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="Confluence, Jira, Slack" data-node-context="Architecture component">
-          <title>Sources · Confluence, Jira, Slack · Architecture component</title>
+        <g id="node-sources" data-node-id="sources" data-node-label="Markdown docs" tabindex="0" role="button" aria-label="Focus Markdown docs, DREW_DOCS_DIR, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="DREW_DOCS_DIR" data-node-context="Architecture component">
+          <title>Markdown docs · DREW_DOCS_DIR · Architecture component</title>
           <rect x="1130" y="530" width="150" height="64" rx="6" class="c-mask"/>
           <rect x="1130" y="530" width="150" height="64" rx="6" class="c-external" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1136 536) scale(0.6875)">
             <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="1205" y="560" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Sources</text>
-        <text data-detail="context" x="1205" y="576" class="t-muted" font-size="9" text-anchor="middle">Confluence, Jira, Slack</text>
+          <text data-node-label="" data-detail-anchor="" x="1205" y="560" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Markdown docs</text>
+        <text data-detail="context" x="1205" y="576" class="t-muted" font-size="9" text-anchor="middle">DREW_DOCS_DIR</text>
         </g>
 
         <g id="node-embeddings" data-node-id="embeddings" data-node-label="Bedrock embeddings" tabindex="0" role="button" aria-label="Focus Bedrock embeddings, Titan v2, 1024 dims, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="Titan v2, 1024 dims" data-node-context="Architecture component">
@@ -5332,9 +5332,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="380.6" y="465" width="86.8" height="14" rx="3" class="c-mask"/>
           <text x="424" y="475" class="t-muted" font-size="8" text-anchor="middle">golden questions</text>
         </g>
-        <g data-detail="context" data-edge-from="sources" data-edge-to="ingest" data-edge-label="REST, changed since cursor" data-edge-key="8" data-edge-id="fetch">
-          <rect x="1137.6" y="510" width="134.8" height="14" rx="3" class="c-mask"/>
-          <text x="1205" y="520" class="t-muted" font-size="8" text-anchor="middle">REST, changed since cursor</text>
+        <g data-detail="context" data-edge-from="sources" data-edge-to="ingest" data-edge-label="full snapshot" data-edge-key="8" data-edge-id="fetch">
+          <rect x="1168.8" y="510" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="1205" y="520" class="t-muted" font-size="8" text-anchor="middle">full snapshot</text>
         </g>
         <g data-detail="context" data-edge-from="ingest" data-edge-to="postgres" data-edge-label="new versions" data-edge-key="9" data-edge-id="store-chunks">
           <rect x="1061.2" y="332" width="67.6" height="14" rx="3" class="c-mask"/>
