@@ -44,27 +44,31 @@ async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
     let s_tcode = chunk(
-        "ARM-1",
+        "note-1.md",
         "Start authorization: S_TCODE is checked when a user calls a transaction.",
     )
     .await;
     let tcode_prose = chunk(
-        "ARM-2",
+        "note-2.md",
         "The s tcode column of the TSTC table lists transactions; see the TCODE field.",
     )
     .await;
-    let agr_users = chunk("ARM-3", "AGR_USERS stores role assignments per user.").await;
+    let agr_users = chunk("note-3.md", "AGR_USERS stores role assignments per user.").await;
     let agr_users_t = chunk(
-        "ARM-4",
+        "note-4.md",
         "AGR_USERS_T holds role texts; agr users read it for descriptions.",
     )
     .await;
     let su24 = chunk(
-        "ARM-5",
+        "note-5.md",
         "Use SU24 to maintain authorization proposal values.",
     )
     .await;
-    let su24n = chunk("ARM-6", "SU24N is the newer screen for proposal values.").await;
+    let su24n = chunk(
+        "note-6.md",
+        "SU24N is the newer screen for proposal values.",
+    )
+    .await;
     let retriever = retriever(&pool, full_text_only());
 
     // English stems both chunks to `tcode`; only the exact token side tells them apart.
@@ -94,8 +98,8 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
         .heading("AGR_1251")
         .insert(&pool)
         .await;
-    let slack = document(&pool, SourceKind::Markdown, "C1:1.0", "thread").await;
-    let italic = SeedChunk::new(&slack, "1.0", 0, "check _USOBT_C_ first")
+    let notes = document(&pool, SourceKind::Markdown, "notes.md", "Notes").await;
+    let italic = SeedChunk::new(&notes, "body", 0, "check _USOBT_C_ first")
         .insert(&pool)
         .await;
     let retriever = retriever(&pool, full_text_only());
@@ -109,7 +113,7 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn prose_query_hits_via_vectors(pool: PgPool) {
     let question = "how do I take away someone's access when they quit";
-    let doc = document(&pool, SourceKind::Markdown, "ARM-7", "Leavers").await;
+    let doc = document(&pool, SourceKind::Markdown, "note-7.md", "Leavers").await;
     // Stands in for a semantic embedding: the chunk shares no stem with the question, only meaning.
     let leavers = SeedChunk::new(
         &doc,
@@ -121,8 +125,8 @@ async fn prose_query_hits_via_vectors(pool: PgPool) {
     .insert(&pool)
     .await;
     for (key, text) in [
-        ("ARM-8", "Transport roles between clients with SCC1."),
-        ("ARM-9", "Payroll cluster tables are read with macros."),
+        ("note-8.md", "Transport roles between clients with SCC1."),
+        ("note-9.md", "Payroll cluster tables are read with macros."),
     ] {
         let doc = document(&pool, SourceKind::Markdown, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await;
@@ -216,8 +220,8 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
     .version("new-check")
     .insert(&pool)
     .await;
-    let gone = document(&pool, SourceKind::Markdown, "ARM-10", "Deleted issue").await;
-    let deleted = SeedChunk::new(&gone, "body", 0, "S_TCODE in a deleted issue.")
+    let gone = document(&pool, SourceKind::Markdown, "deleted.md", "Deleted file").await;
+    let deleted = SeedChunk::new(&gone, "body", 0, "S_TCODE in a deleted file.")
         .superseded()
         .insert(&pool)
         .await;
@@ -236,7 +240,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn confluence_hits_expand_to_neighbouring_sections(pool: PgPool) {
+async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
     let page = document(&pool, SourceKind::Markdown, "30", "SU24 guide").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
@@ -331,22 +335,22 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
-async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgPool) {
-    let issue = document(
+async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool) {
+    let guide = document(
         &pool,
         SourceKind::Markdown,
-        "ARM-11",
-        "ARM-11: import fails",
+        "import-fails.md",
+        "Import fails",
     )
     .await;
-    let summary = SeedChunk::new(&issue, "issue-1", 0, "Import fails on the role upload.")
+    let symptom = SeedChunk::new(&guide, "symptom", 0, "Import fails on the role upload.")
         .insert(&pool)
         .await;
-    let answer = SeedChunk::new(&issue, "issue-2", 1, "Drew: SU24 data was missing.")
+    let cause = SeedChunk::new(&guide, "cause", 1, "Cause: SU24 data was missing.")
         .insert(&pool)
         .await;
-    let thread = document(&pool, SourceKind::Markdown, "C1:2.0", "thread").await;
-    let question = SeedChunk::new(&thread, "thread", 0, "Is SU24 transported? Yes.")
+    let faq = document(&pool, SourceKind::Markdown, "su24-faq.md", "SU24 FAQ").await;
+    let answer = SeedChunk::new(&faq, "body", 0, "Is SU24 transported? Yes.")
         .insert(&pool)
         .await;
 
@@ -356,7 +360,7 @@ async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgP
         .unwrap();
     let mut found = ids(&results);
     found.sort();
-    let mut expected = [summary.0.as_str(), answer.0.as_str(), question.0.as_str()];
+    let mut expected = [symptom.0.as_str(), cause.0.as_str(), answer.0.as_str()];
     expected.sort();
     assert_eq!(found, expected);
 
@@ -368,9 +372,9 @@ async fn split_jira_issues_expand_and_single_chunk_threads_stand_alone(pool: PgP
             .context_for
             .clone()
     };
-    assert_eq!(context_for(&summary.0), Some(answer.clone()));
+    assert_eq!(context_for(&symptom.0), Some(cause.clone()));
+    assert_eq!(context_for(&cause.0), None);
     assert_eq!(context_for(&answer.0), None);
-    assert_eq!(context_for(&question.0), None);
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
@@ -406,7 +410,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn mismatched_embedding_model_is_refused(pool: PgPool) {
     let titan = ModelRef::new("amazon.titan-embed-text-v2", "2");
-    let doc = document(&pool, SourceKind::Markdown, "ARM-12", "Roles").await;
+    let doc = document(&pool, SourceKind::Markdown, "note-12.md", "Roles").await;
     SeedChunk::new(&doc, "old", 0, "AGR_USERS old vectors.")
         .model(titan.clone())
         .superseded()
@@ -438,7 +442,7 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
 async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
     let retriever = retriever(&pool, HybridConfig::default());
     assert!(retriever.retrieve("AGR_USERS").await.unwrap().is_empty());
-    let doc = document(&pool, SourceKind::Markdown, "ARM-13", "Roles").await;
+    let doc = document(&pool, SourceKind::Markdown, "note-13.md", "Roles").await;
     SeedChunk::new(&doc, "body", 0, "AGR_USERS")
         .insert(&pool)
         .await;
@@ -502,19 +506,19 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
     .await;
     let proposals = chunk(
         SourceKind::Markdown,
-        "ARM-20",
+        "note-20.md",
         "SU24 proposal values feed PFCG when roles are built.",
     )
     .await;
     let tables = chunk(
         SourceKind::Markdown,
-        "C2:1.0",
+        "tables.md",
         "S_TABU_DIS protects table maintenance by authorization group.",
     )
     .await;
     let leavers = chunk(
         SourceKind::Markdown,
-        "C2:2.0",
+        "leavers.md",
         "Leavers are locked first, then their roles are removed.",
     )
     .await;
@@ -522,7 +526,7 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
         .into_iter()
         .enumerate()
     {
-        chunk(SourceKind::Markdown, &format!("ARM-3{i}"), text).await;
+        chunk(SourceKind::Markdown, &format!("note-3{i}.md"), text).await;
     }
     let golden: [(&str, &[&ChunkId]); 5] = [
         ("Is S_TCODE checked at transaction start?", &[&start]),

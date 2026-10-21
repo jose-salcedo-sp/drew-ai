@@ -277,9 +277,9 @@ pub fn reciprocal_rank_fusion(lists: &[&[ChunkId]], k: f64) -> Vec<(ChunkId, f64
 /// Expands fused hits (best first) to their parent units and dedupes by chunk id.
 ///
 /// Every hit is kept. A hit also pulls in the previous and next current chunks of its document (ordinal ±1 when
-/// ordinals are dense): neighbouring Confluence sections, or neighbouring parts of a Jira issue split on comment
-/// boundaries. Each is scored one step below the hit, while the document has fewer than `max_per_document` chunks
-/// in the result; the cap never drops a hit. Single-chunk units (Slack threads, most Jira issues) have no neighbours.
+/// ordinals are dense): the neighbouring sections of a markdown file. Each is scored one step below the hit, while
+/// the document has fewer than `max_per_document` chunks in the result; the cap never drops a hit. A file with a
+/// single section has no neighbours.
 /// A chunk reached twice keeps its best score, and the result is sorted best first.
 fn expand(
     hits: &[(ChunkId, f64)],
@@ -423,12 +423,6 @@ impl TryFrom<ChunkRow> for Chunk {
     type Error = eros::ErrorUnion;
 
     fn try_from(row: ChunkRow) -> eros::Result<Self> {
-        if matches!(row.source.as_str(), "confluence" | "jira" | "slack") {
-            return Err(error!(
-                "chunk {} is from legacy source {}; re-ingest the markdown corpus",
-                row.id, row.source
-            ));
-        }
         let source = SourceKind::try_from(row.source.as_str())
             .with_context(|| format!("chunk {}", row.id))?;
         let sensitivity = Sensitivity::try_from(row.sensitivity.as_str())

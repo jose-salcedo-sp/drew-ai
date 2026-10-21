@@ -23,7 +23,9 @@ async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Resu
     for source in SourceKind::ALL {
         document(source.as_str()).execute(&pool).await?;
     }
-    assert!(document("unknown").execute(&pool).await.is_err());
+    for source in ["unknown", "confluence", "jira", "slack"] {
+        assert!(document(source).execute(&pool).await.is_err(), "{source}");
+    }
 
     let chunk = |locator: &str, sensitivity: &str| {
         sqlx::query(
@@ -62,7 +64,7 @@ async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Resu
 async fn a_chunk_has_one_current_version(pool: PgPool) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
-         VALUES ('confluence:1', 'confluence', '1', 'Roles', 'https://example.test/1', now())",
+         VALUES ('markdown:roles.md', 'markdown', 'roles.md', 'Roles', 'https://example.test/roles.md', now())",
     )
     .execute(&pool)
     .await?;
@@ -71,8 +73,8 @@ async fn a_chunk_has_one_current_version(pool: PgPool) -> sqlx::Result<()> {
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, url, text, authoritative, acl,
                                  sensitivity, embedding, embedding_model, embedding_model_version)
-             VALUES ('confluence:1#intro', $1, 'confluence:1', 0, 'https://example.test/1', 'text',
-                     true, '{}', 'internal', $2, 'fake', '1')",
+             VALUES ('markdown:roles.md#intro', $1, 'markdown:roles.md', 0, 'https://example.test/roles.md',
+                     'text', true, '{}', 'internal', $2, 'fake', '1')",
         )
         .bind(version)
         .bind(Vector::from(vec![0.0; EMBEDDING_DIM]))
@@ -85,5 +87,55 @@ async fn a_chunk_has_one_current_version(pool: PgPool) -> sqlx::Result<()> {
         .execute(&pool)
         .await?;
     insert("v2").execute(&pool).await?;
+    Ok(())
+}
+
+#[sqlx::test(migrations = false)]
+async fn markdown_only_migration_removes_legacy_sources(pool: PgPool) -> sqlx::Result<()> {
+    const BEFORE: i64 = 20261012000000;
+    let migrator = &drew::store::MIGRATOR;
+    migrator.run_to(BEFORE, &pool).await?;
+
+    for (document, source) in [
+        ("confluence:1", "confluence"),
+        ("jira:ARM-1", "jira"),
+        ("slack:C1:1.0", "slack"),
+        ("markdown:roles.md", "markdown"),
+    ] {
+        sqlx::query(
+            "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
+             VALUES ($1, $2, $1, 'Roles', 'https://example.test/', now())",
+        )
+        .bind(document)
+        .bind(source)
+        .execute(&pool)
+        .await?;
+        for (locator, superseded) in [("old", true), ("intro", false)] {
+            sqlx::query(
+                "INSERT INTO chunks (id, version, document_id, ordinal, url, text, authoritative, acl,
+                                     sensitivity, embedding, embedding_model, embedding_model_version,
+                                     superseded_at)
+                 VALUES ($1 || '#' || $2, 'v1', $1, 0, 'https://example.test/', 'text', true, '{}',
+                         'internal', $3, 'fake', '1', CASE WHEN $4 THEN now() END)",
+            )
+            .bind(document)
+            .bind(locator)
+            .bind(Vector::from(vec![0.0; EMBEDDING_DIM]))
+            .bind(superseded)
+            .execute(&pool)
+            .await?;
+        }
+    }
+
+    migrator.run(&pool).await?;
+
+    let documents: Vec<String> = sqlx::query_scalar("SELECT id FROM documents ORDER BY id")
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(documents, ["markdown:roles.md"]);
+    let chunks: Vec<String> = sqlx::query_scalar("SELECT id FROM chunks ORDER BY id")
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(chunks, ["markdown:roles.md#intro", "markdown:roles.md#old"]);
     Ok(())
 }

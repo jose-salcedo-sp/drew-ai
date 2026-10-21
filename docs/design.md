@@ -282,10 +282,10 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 Designed, not built:
 
 - Postgres RLS policies over the recorded labels; filter inside the vector query, recheck before LLM context.
-- Users retrieve only what they can already open in Confluence, Jira, and Slack (identity mapped by email, group memberships cached).
+- Users retrieve only what their groups may read (identity mapped by email, group memberships cached).
 - `confidential` chunks restricted to a Drew-owned maintainers group.
 - Customers see only chunks with their own customer label or none.
-- Event-driven ingestion (webhooks, Slack Events API) with revocation effective within 1 hour and freshness within 24 hours, plus a nightly permission resync.
+- Ingestion on change to the markdown directory, with revocation effective within 1 hour and freshness within 24 hours, plus a nightly permission resync.
 - Slack bot hardening beyond v1 (channel allowlists, rate limits).
 - EKS deployment through the shared GitOps repos, Aurora, SageMaker for System One.
 - Audit log retention: 1 year.
