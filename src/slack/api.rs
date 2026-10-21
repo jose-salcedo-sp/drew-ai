@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{Client as HttpClient, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 
 const SLACK_API: &str = "https://slack.com/api/";
 /// Web API methods answer in about a second; this bounds a hung call so its event task ends.
@@ -27,6 +27,7 @@ pub trait SlackApi: Send + Sync {
 
 pub struct SlackClient {
     http: HttpClient,
+    base_url: String,
     app_token: String,
     bot_token: String,
 }
@@ -35,9 +36,43 @@ impl SlackClient {
     pub fn new(app_token: String, bot_token: String) -> eros::Result<Self> {
         Ok(Self {
             http: http_client()?,
+            base_url: SLACK_API.into(),
             app_token,
             bot_token,
         })
+    }
+
+    /// Sends every call under `base_url` (ending in `/`) instead of `https://slack.com/api/`.
+    pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            ..self
+        }
+    }
+
+    /// Calls a Web API method. A non-200 status or `ok: false` is an error naming Slack's reason.
+    #[eros::context("Slack {}", method)]
+    async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        token: &str,
+        form: &[(&str, &str)],
+    ) -> eros::Result<T> {
+        let response = self
+            .http
+            .post(format!("{}{method}", self.base_url))
+            .bearer_auth(token)
+            .form(form)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        eros::ensure!(status == StatusCode::OK, "returned {status}: {body}");
+        let reply: ApiOk = serde_json::from_str(&body)?;
+        if !reply.ok {
+            eros::bail!("{}", reply.error.as_deref().unwrap_or("unknown error"));
+        }
+        Ok(serde_json::from_str(&body)?)
     }
 }
 
@@ -60,25 +95,12 @@ impl SlackApi for SlackClient {
     async fn open_connection(&self) -> eros::Result<String> {
         #[derive(Deserialize)]
         struct Open {
-            #[serde(flatten)]
-            base: ApiOk,
             url: Option<String>,
         }
-        let body: Open = self
-            .http
-            .post(format!("{SLACK_API}apps.connections.open"))
-            .bearer_auth(&self.app_token)
-            .send()
-            .await?
-            .json()
+        let open: Open = self
+            .call("apps.connections.open", &self.app_token, &[])
             .await?;
-        if !body.base.ok {
-            eros::bail!(
-                "apps.connections.open: {}",
-                body.base.error.unwrap_or_else(|| "unknown".into())
-            );
-        }
-        body.url
+        open.url
             .ok_or_else(|| eros::error!("apps.connections.open missing url"))
     }
 
@@ -90,55 +112,24 @@ impl SlackApi for SlackClient {
     ) -> eros::Result<String> {
         #[derive(Deserialize)]
         struct Posted {
-            #[serde(flatten)]
-            base: ApiOk,
             ts: Option<String>,
         }
         let mut form = vec![("channel", channel), ("text", text)];
         if let Some(ts) = thread_ts {
             form.push(("thread_ts", ts));
         }
-        let response = self
-            .http
-            .post(format!("{SLACK_API}chat.postMessage"))
-            .bearer_auth(&self.bot_token)
-            .form(&form)
-            .send()
+        let posted: Posted = self
+            .call("chat.postMessage", &self.bot_token, &form)
             .await?;
-        let status = response.status();
-        let body: Posted = response.json().await?;
-        if status != StatusCode::OK || !body.base.ok {
-            eros::bail!(
-                "chat.postMessage: {}",
-                body.base.error.unwrap_or_else(|| status.to_string())
-            );
-        }
-        body.ts
+        posted
+            .ts
             .ok_or_else(|| eros::error!("chat.postMessage missing ts"))
     }
 
     async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()> {
-        #[derive(Deserialize)]
-        struct Updated {
-            #[serde(flatten)]
-            base: ApiOk,
-        }
         let form = [("channel", channel), ("ts", ts), ("text", text)];
-        let response = self
-            .http
-            .post(format!("{SLACK_API}chat.update"))
-            .bearer_auth(&self.bot_token)
-            .form(&form)
-            .send()
+        self.call::<serde::de::IgnoredAny>("chat.update", &self.bot_token, &form)
             .await?;
-        let status = response.status();
-        let body: Updated = response.json().await?;
-        if status != StatusCode::OK || !body.base.ok {
-            eros::bail!(
-                "chat.update: {}",
-                body.base.error.unwrap_or_else(|| status.to_string())
-            );
-        }
         Ok(())
     }
 }
