@@ -9,6 +9,8 @@
 #[path = "../common/runs.rs"]
 mod runs;
 
+mod bedrock;
+mod embedder;
 mod retriever;
 mod run_store;
 mod system_one;
