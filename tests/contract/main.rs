@@ -10,6 +10,7 @@
 mod runs;
 
 mod bedrock;
+mod chat_model;
 mod embedder;
 mod retriever;
 mod run_store;
