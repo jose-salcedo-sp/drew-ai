@@ -43,12 +43,13 @@ jobs:
           persist-credentials: false
 
       # The image leaves about 2 GB free after a build, below mbx's free-space floor (10% of the disk), where gc
-      # evicts the action store. The job uses none of these SDKs.
+      # evicts the action store. The job uses none of these SDKs. Removing them takes 40 s to 3 min, so it runs
+      # alongside the build, and `mbx gc` waits for it.
       - name: Free runner disk
         run: |
           df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-          df -h /
+          setsid bash -c 'sudo rm -rf /usr/local/lib/android /usr/share/dotnet; touch "$RUNNER_TEMP/disk-freed"' \
+            > /dev/null 2>&1 < /dev/null &
 
       # Installs the channel and components named in rust-toolchain.toml.
       - name: Install toolchain
@@ -114,6 +115,7 @@ jobs:
         id: mbx-gc
         if: ${{ !cancelled() }}
         run: |
+          timeout 600 bash -c 'until [ -e "$RUNNER_TEMP/disk-freed" ]; do sleep 1; done'
           df -h /
           mbx gc
           mbx cache stats
