@@ -199,8 +199,8 @@ mod socket {
     use crate::{
         pipeline::report::RunReport,
         slack::{
-            BUSY_REPLY, DRAIN_TIMEOUT, MAX_BUSY_REPLIES, MAX_CONCURRENT_EVENTS, MAX_QUEUED_EVENTS,
-            PLACEHOLDER, RESTART_NOTICE_TIMEOUT, RESTARTED_REPLY,
+            BUSY_REPLY, DRAIN_TIMEOUT, FAILED_REPLY, MAX_BUSY_REPLIES, MAX_CONCURRENT_EVENTS,
+            MAX_QUEUED_EVENTS, PLACEHOLDER, RESTART_NOTICE_TIMEOUT, RESTARTED_REPLY,
             api::SlackApi,
             fakes::{FakeSocket, connection_pair},
             socket::{Backoff, Connector, Ending, IDLE_TIMEOUT, WebSocketConnector, run_session},
@@ -823,6 +823,28 @@ mod socket {
             1,
             "{logs}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicked_event_replaces_its_placeholder_at_once() {
+        let slack = Arc::new(FakeSlack::default());
+        let (_, updated_early) = serve_events_while(
+            Arc::<FakeSlack>::clone(&slack),
+            Arc::new(PanickingAnswerer),
+            &[mention()],
+            Duration::from_secs(30),
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                slack.updates.lock().unwrap().clone()
+            },
+        )
+        .await;
+        let placeholder_ts = slack.posts.lock().unwrap().len().to_string() + ".0001";
+        assert_eq!(
+            updated_early,
+            [("C1".to_owned(), placeholder_ts, FAILED_REPLY.to_owned())]
+        );
+        assert_eq!(slack.updates.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]

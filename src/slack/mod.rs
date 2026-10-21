@@ -11,10 +11,12 @@ mod tests;
 
 use std::{
     collections::HashMap,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
+use futures::FutureExt;
 use serde_json::Value;
 use tokio::{
     sync::{Semaphore, watch},
@@ -129,10 +131,13 @@ const MAX_BUSY_REPLIES: usize = 4;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long shutdown spends replacing unanswered placeholders with `RESTARTED_REPLY`.
 const RESTART_NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a panicked event spends replacing its placeholder with `FAILED_REPLY`.
+const FAILURE_NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PLACEHOLDER: &str = "Looking that up...";
 const BUSY_REPLY: &str =
     "I'm busy with other questions right now. Please try again in a few minutes.";
+const FAILED_REPLY: &str = "Something went wrong while I was answering. Please ask again.";
 const RESTARTED_REPLY: &str = "I restarted before I could answer. Please ask again.";
 
 /// A question asked in Slack, and where to answer it.
@@ -278,7 +283,24 @@ impl EventTasks {
                 .acquire_owned()
                 .await
                 .expect("the event semaphore is never closed");
-            let text = answer_text(&state, ask).await;
+            // Caught here rather than in `reap`, which runs only when the next event arrives or the
+            // session ends.
+            let text = match AssertUnwindSafe(answer_text(&state, ask))
+                .catch_unwind()
+                .await
+            {
+                Ok(text) => text,
+                Err(panic) => {
+                    lock(&unanswered).remove(&task::id());
+                    if let Err(error) = notify_failed(api.as_ref(), &placeholder).await {
+                        tracing::warn!(
+                            error = format!("{error:#?}"),
+                            "slack failure notice failed"
+                        );
+                    }
+                    std::panic::resume_unwind(panic);
+                }
+            };
             // Removed by hand, not by a drop guard, so an aborted task stays listed for the restart
             // notice; and before the update, since once its request may have reached Slack, a
             // restart notice could overwrite the answer.
@@ -335,6 +357,15 @@ impl EventTasks {
             tracing::warn!("slack restart notices still unsent after {within:?} were abandoned");
         }
     }
+}
+
+#[eros::context("replace a failed slack event's placeholder")]
+async fn notify_failed(api: &dyn SlackApi, placeholder: &Placeholder) -> eros::Result<()> {
+    let notice = placeholder.replace(api, FAILED_REPLY);
+    let Ok(replaced) = tokio::time::timeout(FAILURE_NOTICE_TIMEOUT, notice).await else {
+        eros::bail!("timed out after {FAILURE_NOTICE_TIMEOUT:?}");
+    };
+    replaced
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
