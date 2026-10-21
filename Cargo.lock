@@ -1025,6 +1025,7 @@ dependencies = [
  "chrono",
  "clap",
  "console",
+ "drew",
  "eros",
  "futures",
  "hex",

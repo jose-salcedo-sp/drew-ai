@@ -51,7 +51,12 @@ indicatif = "0.18.6"
 console = "0.16.6"
 eros = "0.8.1"
 
+[features]
+# The fakes in `*/fakes.rs`, for integration tests; release builds leave them out.
+testing = []
+
 [dev-dependencies]
+drew = { path = ".", features = ["testing"] }
 http-body-util = "0.1.5"
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"

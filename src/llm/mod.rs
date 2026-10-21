@@ -3,6 +3,7 @@
 
 pub mod bedrock_chat;
 pub mod bedrock_embed;
+#[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod openai;
 pub mod system_one;

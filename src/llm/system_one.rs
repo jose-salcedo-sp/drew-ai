@@ -147,6 +147,7 @@ impl HttpSystemOne {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub use super::fakes::ScriptedSystemOne;
 
 #[cfg(test)]

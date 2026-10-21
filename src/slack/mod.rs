@@ -1,6 +1,7 @@
 //! Developer-facing Slack bot over Socket Mode, sharing the HTTP API's answerer and run store.
 
 pub mod api;
+#[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod render;
 pub mod socket;

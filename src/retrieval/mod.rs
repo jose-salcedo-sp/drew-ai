@@ -1,5 +1,6 @@
 //! Hybrid retrieval: full-text + vector over current chunk versions, merged with reciprocal rank fusion.
 
+#[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod hybrid;
 
