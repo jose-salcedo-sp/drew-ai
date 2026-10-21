@@ -122,7 +122,7 @@ async fn answers_with_citations_numbered_by_first_use() {
         panic!("rerank record");
     };
     assert_eq!(rerank.chunks[0].chunk, agr.reference());
-    assert_eq!(rerank.chunks.len(), 2);
+    assert_eq!(rerank.chunks.len(), 3);
 }
 
 #[tokio::test]
@@ -146,7 +146,7 @@ async fn uncited_claim_declines_with_the_reranked_sources() {
     assert_eq!(at, "verify");
     assert!(matches!(reason, DeclineReason::Unverified(_)));
     let ranked: Vec<_> = sources.iter().map(|s| s.chunk.id.clone()).collect();
-    assert_eq!(ranked, [agr_users().id, usr02().id]);
+    assert_eq!(ranked, [agr_users().id, usr02().id, unrelated().id]);
     assert!(matches!(
         record(&report, "verify"),
         TraceRecord::Verify(r) if r.uncited_claims == ["Roles expire at midnight."] && r.unknown_citations.is_empty()
@@ -210,7 +210,7 @@ async fn invalid_json_declines_with_the_raw_output_in_the_trace() {
     assert!(matches!(
         &report.outcome,
         Outcome::Declined { at, reason: DeclineReason::InvalidModelOutput(_), sources, .. }
-            if at == "explain" && sources.len() == 2
+            if at == "explain" && sources.len() == 3
     ));
     let explain = report.trace.entries().last().unwrap();
     assert_eq!(explain.step, "explain");
@@ -227,10 +227,10 @@ async fn invalid_json_declines_with_the_raw_output_in_the_trace() {
 }
 
 #[tokio::test]
-async fn no_sources_declines_without_calling_the_model() {
+async fn an_empty_corpus_declines_without_calling_the_model() {
     let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
 
-    let report = ask(vec![unrelated()], &chat).await;
+    let report = ask(Vec::new(), &chat).await;
 
     assert!(matches!(
         &report.outcome,

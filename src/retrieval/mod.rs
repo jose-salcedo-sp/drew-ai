@@ -20,6 +20,9 @@ pub struct Retrieved {
 
 #[async_trait]
 pub trait Retriever: Send + Sync {
-    /// Top hybrid matches, expanded to their parent unit and deduplicated, best first.
+    /// Top hybrid matches, expanded to their parent unit and deduplicated, best first, ties by chunk id.
+    ///
+    /// There is no relevance floor: a non-blank query over a non-empty corpus returns its nearest chunks even when
+    /// none is about the question, and Rerank judges relevance. Only a blank query or an empty corpus returns nothing.
     async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>>;
 }

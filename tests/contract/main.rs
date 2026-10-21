@@ -9,4 +9,5 @@
 #[path = "../common/runs.rs"]
 mod runs;
 
+mod retriever;
 mod run_store;

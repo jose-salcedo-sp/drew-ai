@@ -6,7 +6,8 @@ use crate::domain::{Chunk, Score};
 
 use super::{Retrieved, Retriever};
 
-/// Ranks chunks by the fraction of query words they contain. Chunks with no shared word are dropped.
+/// Ranks every chunk by the fraction of query words it contains, ties by chunk id. Like the vector side of
+/// `HybridRetriever`, it keeps chunks that share no word: judging relevance is Rerank's job.
 pub struct KeywordRetriever {
     pub chunks: Vec<Chunk>,
 }
@@ -14,23 +15,28 @@ pub struct KeywordRetriever {
 #[async_trait]
 impl Retriever for KeywordRetriever {
     async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>> {
-        let query = words(query);
-        if query.is_empty() {
+        if query.trim().is_empty() {
             return Ok(Vec::new());
         }
+        let query = words(query);
         let mut hits: Vec<_> = self
             .chunks
             .iter()
-            .filter_map(|chunk| {
+            .map(|chunk| {
                 let shared = query.intersection(&words(&chunk.text)).count();
-                (shared > 0).then(|| Retrieved {
+                Retrieved {
                     chunk: chunk.clone(),
-                    score: Score(shared as f32 / query.len() as f32),
+                    score: Score(shared as f32 / query.len().max(1) as f32),
                     context_for: None,
-                })
+                }
             })
             .collect();
-        hits.sort_by(|a, b| b.score.0.total_cmp(&a.score.0));
+        hits.sort_by(|a, b| {
+            b.score
+                .0
+                .total_cmp(&a.score.0)
+                .then_with(|| a.chunk.id.cmp(&b.chunk.id))
+        });
         Ok(hits)
     }
 }
