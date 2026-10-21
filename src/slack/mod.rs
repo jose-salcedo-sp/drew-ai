@@ -121,6 +121,9 @@ async fn stopped(shutdown: &mut watch::Receiver<bool>) {
 const MAX_CONCURRENT_EVENTS: usize = 4;
 /// Events past this many waiting for a pipeline get `BUSY_REPLY`, so a burst cannot queue without end.
 const MAX_QUEUED_EVENTS: usize = 16;
+/// Busy replies in flight at once; events past them are dropped, so a burst cannot grow the Slack
+/// calls without end either.
+const MAX_BUSY_REPLIES: usize = 4;
 /// With `RESTART_NOTICE_TIMEOUT` and the HTTP drain alongside it, fits in Kubernetes' default 30 s
 /// termination grace period.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
@@ -217,13 +220,15 @@ impl Placeholder {
     }
 }
 
-/// Event tasks: every one is tracked, at most `MAX_CONCURRENT_EVENTS` run at once, and at most
-/// `MAX_QUEUED_EVENTS` more wait. Each posts its placeholder before it waits.
+/// Event tasks: every one is tracked, at most `MAX_CONCURRENT_EVENTS` run at once, at most
+/// `MAX_QUEUED_EVENTS` more wait, and at most `MAX_BUSY_REPLIES` busy replies are in flight.
+/// Each admitted task posts its placeholder before it waits.
 struct EventTasks {
     api: Arc<dyn SlackApi>,
     tasks: JoinSet<eros::Result<()>>,
     running: Arc<Semaphore>,
     admitted: Arc<Semaphore>,
+    busy_replies: Arc<Semaphore>,
     /// Placeholders not yet replaced by an answer, by the task that posted them.
     unanswered: Arc<Mutex<HashMap<task::Id, Placeholder>>>,
 }
@@ -235,6 +240,7 @@ impl EventTasks {
             tasks: JoinSet::new(),
             running: Arc::new(Semaphore::new(MAX_CONCURRENT_EVENTS)),
             admitted: Arc::new(Semaphore::new(MAX_CONCURRENT_EVENTS + MAX_QUEUED_EVENTS)),
+            busy_replies: Arc::new(Semaphore::new(MAX_BUSY_REPLIES)),
             unanswered: Arc::default(),
         }
     }
@@ -243,11 +249,19 @@ impl EventTasks {
         self.reap();
         let api = Arc::clone(&self.api);
         let Ok(admitted) = Arc::clone(&self.admitted).try_acquire_owned() else {
+            let Ok(replying) = Arc::clone(&self.busy_replies).try_acquire_owned() else {
+                tracing::warn!(
+                    queued = MAX_QUEUED_EVENTS,
+                    "slack event queue and busy replies are full; dropped the event"
+                );
+                return;
+            };
             tracing::warn!(
                 queued = MAX_QUEUED_EVENTS,
                 "slack event queue is full; replied busy"
             );
             self.tasks.spawn(async move {
+                let _replying = replying;
                 api.post_message(&ask.channel, ask.thread_ts.as_deref(), BUSY_REPLY)
                     .await?;
                 Ok(())

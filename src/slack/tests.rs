@@ -199,8 +199,8 @@ mod socket {
     use crate::{
         pipeline::report::RunReport,
         slack::{
-            BUSY_REPLY, DRAIN_TIMEOUT, MAX_CONCURRENT_EVENTS, MAX_QUEUED_EVENTS, PLACEHOLDER,
-            RESTART_NOTICE_TIMEOUT, RESTARTED_REPLY,
+            BUSY_REPLY, DRAIN_TIMEOUT, MAX_BUSY_REPLIES, MAX_CONCURRENT_EVENTS, MAX_QUEUED_EVENTS,
+            PLACEHOLDER, RESTART_NOTICE_TIMEOUT, RESTARTED_REPLY,
             api::SlackApi,
             fakes::{FakeSocket, connection_pair},
             socket::{Backoff, Connector, Ending, IDLE_TIMEOUT, WebSocketConnector, run_session},
@@ -607,6 +607,53 @@ mod socket {
             self.0.update_message(channel, ts, text).await?;
             std::future::pending().await
         }
+    }
+
+    /// Like `FakeSlack`, but each post takes `POST_TAKES`.
+    struct SlowPosts(Arc<FakeSlack>);
+
+    const POST_TAKES: Duration = Duration::from_secs(1);
+
+    #[async_trait]
+    impl SlackApi for SlowPosts {
+        async fn open_connection(&self) -> eros::Result<String> {
+            self.0.open_connection().await
+        }
+
+        async fn post_message(
+            &self,
+            channel: &str,
+            thread_ts: Option<&str>,
+            text: &str,
+        ) -> eros::Result<String> {
+            tokio::time::sleep(POST_TAKES).await;
+            self.0.post_message(channel, thread_ts, text).await
+        }
+
+        async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()> {
+            self.0.update_message(channel, ts, text).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_past_the_busy_reply_limit_are_dropped_and_logged() {
+        let (logs, _guard) = Logs::capture();
+        let slack = Arc::new(FakeSlack::default());
+        let admitted = MAX_CONCURRENT_EVENTS + MAX_QUEUED_EVENTS;
+        let events = vec![mention(); admitted + MAX_BUSY_REPLIES + 3];
+        serve_events_while(
+            Arc::new(SlowPosts(Arc::clone(&slack))),
+            Arc::new(SlowAnswerer::new(Duration::from_secs(5))),
+            &events,
+            Duration::from_secs(60),
+            async {},
+        )
+        .await;
+        let posts = slack.posts.lock().unwrap();
+        assert_eq!(texts(&posts, PLACEHOLDER), admitted);
+        assert_eq!(texts(&posts, BUSY_REPLY), MAX_BUSY_REPLIES);
+        let logs = logs.text();
+        assert_eq!(logs.matches("dropped the event").count(), 3, "{logs}");
     }
 
     #[tokio::test(start_paused = true)]
