@@ -25,7 +25,7 @@ use crate::{
 
 use self::{
     api::{SlackApi, SlackClient},
-    socket::{Backoff, Connector, WebSocketConnector},
+    socket::{Backoff, Connector, Ending, WebSocketConnector},
 };
 
 #[derive(Debug, clap::Args)]
@@ -77,13 +77,18 @@ impl Bot {
                 ended = self.session(&mut backoff, on_event) => ended,
             };
             events.reap();
-            let delay = match ended {
-                Ok(()) => continue,
+            match &ended {
+                Ok(Ending::Refresh) => tracing::info!("slack refreshed the socket"),
+                Ok(Ending::LinkDisabled) => tracing::error!(
+                    "slack disabled socket mode for this app; enable it in the app settings. \
+                     Retrying every {:?}",
+                    Backoff::MAX
+                ),
                 Err(error) => {
                     tracing::warn!(error = format!("{error:#?}"), "slack socket reconnecting");
-                    backoff.next_delay()
                 }
-            };
+            }
+            let delay = backoff.after(&ended);
             tokio::select! {
                 () = stopped(&mut shutdown) => break,
                 () = tokio::time::sleep(delay) => {}
@@ -96,7 +101,7 @@ impl Bot {
         &self,
         backoff: &mut Backoff,
         on_event: impl FnMut(Value) + Send,
-    ) -> eros::Result<()> {
+    ) -> eros::Result<Ending> {
         let url = self.api.open_connection().await?;
         let connection = self.connector.connect(&url).await?;
         socket::run_session(connection, backoff, on_event).await

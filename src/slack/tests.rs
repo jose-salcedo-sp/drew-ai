@@ -201,7 +201,7 @@ mod socket {
         slack::{
             DRAIN_TIMEOUT, MAX_CONCURRENT_EVENTS,
             fakes::{FakeSocket, connection_pair},
-            socket::{Backoff, Connector, IDLE_TIMEOUT, WebSocketConnector, run_session},
+            socket::{Backoff, Connector, Ending, IDLE_TIMEOUT, WebSocketConnector, run_session},
         },
     };
 
@@ -213,16 +213,46 @@ mod socket {
         envelope(&json!({ "type": "hello" }))
     }
 
-    fn disconnect() -> Message {
-        envelope(&json!({ "type": "disconnect", "reason": "refresh_requested" }))
+    fn disconnect(reason: &str) -> Message {
+        envelope(&json!({ "type": "disconnect", "reason": reason }))
     }
 
-    /// A backoff whose next delay is no longer `INITIAL`.
-    fn grown() -> Backoff {
-        let mut backoff = Backoff::default();
-        backoff.next_delay();
-        backoff.next_delay();
-        backoff
+    /// Runs the bot over `socket` until `stop_after`, and returns when each connect started,
+    /// measured from the start.
+    async fn connect_offsets(socket: Arc<FakeSocket>, stop_after: Duration) -> Vec<Duration> {
+        let bot = Bot::new(
+            Arc::new(FakeSlack::default()),
+            Arc::<FakeSocket>::clone(&socket),
+        );
+        let (stop, shutdown) = watch::channel(false);
+        let started = Instant::now();
+        tokio::join!(
+            bot.run(
+                state(canned(answered()), Arc::new(MemoryRunStore::default())),
+                shutdown
+            ),
+            async {
+                tokio::time::sleep(stop_after).await;
+                stop.send(true).unwrap();
+            }
+        );
+        socket
+            .connects()
+            .iter()
+            .map(|at| at.duration_since(started))
+            .collect()
+    }
+
+    fn gaps(offsets: &[Duration]) -> Vec<Duration> {
+        offsets.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    /// Each gap is a failure's jittered delay: the `i`th lies in `[INITIAL * 2^i / 2, INITIAL * 2^i]`.
+    fn assert_backs_off(gaps: &[Duration]) {
+        for (i, gap) in gaps.iter().enumerate() {
+            let full = Backoff::INITIAL * 2u32.pow(u32::try_from(i).unwrap());
+            assert!(*gap >= full / 2 && *gap <= full, "gap {i} of {gaps:?}");
+        }
     }
 
     async fn carries_frames_both_ways<S>(
@@ -275,33 +305,62 @@ mod socket {
         assert!(WebSocketConnector.connect(&url).await.is_err());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn disconnect_ends_a_healthy_session_and_resets_the_backoff() {
+    async fn session_ending(frames: Vec<Message>) -> eros::Result<Ending> {
         let (bot, mut slack) = connection_pair().await;
-        slack.send(hello()).await.unwrap();
-        slack.send(disconnect()).await.unwrap();
-        let mut backoff = grown();
-        run_session(bot, &mut backoff, |_| {}).await.unwrap();
-        assert_eq!(backoff.next_delay(), Backoff::INITIAL);
+        for frame in frames {
+            slack.send(frame).await.unwrap();
+        }
+        run_session(bot, &mut Backoff::default(), |_| {}).await
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_close_after_hello_is_routine() {
+    async fn refresh_requested_and_a_close_after_hello_are_routine() {
+        let refreshed = session_ending(vec![hello(), disconnect("refresh_requested")]).await;
+        assert_eq!(refreshed.unwrap(), Ending::Refresh);
+        let closed = session_ending(vec![hello(), Message::Close(None)]).await;
+        assert_eq!(closed.unwrap(), Ending::Refresh);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn link_disabled_ends_the_session_as_disabled() {
+        let ended = session_ending(vec![hello(), disconnect("link_disabled")]).await;
+        assert_eq!(ended.unwrap(), Ending::LinkDisabled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn too_many_websockets_and_unknown_reasons_are_failures() {
+        for reason in ["too_many_websockets", "something_new"] {
+            let error = session_ending(vec![hello(), disconnect(reason)])
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#?}").contains(reason), "{error:#?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_warning_keeps_the_session_serving() {
         let (bot, mut slack) = connection_pair().await;
         slack.send(hello()).await.unwrap();
-        slack.send(Message::Close(None)).await.unwrap();
-        run_session(bot, &mut Backoff::default(), |_| {})
+        slack.send(disconnect("warning")).await.unwrap();
+        let event = json!({ "type": "app_mention" });
+        slack
+            .send(envelope(&json!({
+                "type": "events_api",
+                "envelope_id": "E1",
+                "payload": { "event": event },
+            })))
             .await
             .unwrap();
+        slack.send(disconnect("refresh_requested")).await.unwrap();
+        let mut events = Vec::new();
+        let ended = run_session(bot, &mut Backoff::default(), |event| events.push(event)).await;
+        assert_eq!(ended.unwrap(), Ending::Refresh);
+        assert_eq!(events, [event]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_close_before_hello_is_a_failure() {
-        let (bot, mut slack) = connection_pair().await;
-        slack.send(Message::Close(None)).await.unwrap();
-        let mut backoff = grown();
-        assert!(run_session(bot, &mut backoff, |_| {}).await.is_err());
-        assert_ne!(backoff.next_delay(), Backoff::INITIAL);
+        assert!(session_ending(vec![Message::Close(None)]).await.is_err());
     }
 
     #[tokio::test(start_paused = true)]
@@ -364,40 +423,65 @@ mod socket {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn reconnects_at_once_after_disconnect_and_resets_the_backoff_after_hello() {
+    async fn a_healthy_session_resets_the_backoff_and_its_refresh_waits_only_the_floor() {
         let socket = Arc::new(FakeSocket::default());
         socket.refuse();
         socket.refuse();
         let mut slack = socket.accept().await;
         slack.send(hello()).await.unwrap();
-        slack.send(disconnect()).await.unwrap();
         socket.refuse();
-        let bot = Bot::new(
-            Arc::new(FakeSlack::default()),
-            Arc::<FakeSocket>::clone(&socket),
-        );
-        let (stop, shutdown) = watch::channel(false);
-        let started = Instant::now();
-
-        tokio::join!(
-            bot.run(
-                state(canned(answered()), Arc::new(MemoryRunStore::default())),
-                shutdown
-            ),
+        let refresh_at = Duration::from_secs(45);
+        let (offsets, ()) = tokio::join!(
+            connect_offsets(Arc::clone(&socket), Duration::from_secs(60)),
             async {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                stop.send(true).unwrap();
+                tokio::time::sleep(refresh_at).await;
+                slack.send(disconnect("refresh_requested")).await.unwrap();
             }
         );
 
-        let offsets: Vec<u64> = socket
-            .connects()
-            .iter()
-            .map(|at| at.duration_since(started).as_secs())
-            .collect();
-        // Refused twice (waits 1 s, 2 s), then a healthy session Slack ends: reconnect at once.
-        // The next refusal waits `INITIAL` again instead of 4 s.
-        assert_eq!(offsets, [0, 1, 3, 3, 4]);
+        assert_eq!(offsets.len(), 5, "{offsets:?}");
+        let gaps = gaps(&offsets);
+        // Two refusals back off, then the session is up from about 3 s to `refresh_at`.
+        assert_backs_off(&gaps[..2]);
+        assert_eq!(offsets[3], refresh_at + Backoff::FLOOR);
+        // The refusal after it waits about `INITIAL` again, not the 4 s it had grown to.
+        assert_backs_off(&gaps[3..]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sessions_slack_ends_soon_after_hello_back_off() {
+        for ending in [
+            Message::Close(None),
+            disconnect("refresh_requested"),
+            disconnect("too_many_websockets"),
+            disconnect("something_new"),
+        ] {
+            let socket = Arc::new(FakeSocket::default());
+            let mut ends = Vec::new();
+            for _ in 0..5 {
+                let mut slack = socket.accept().await;
+                slack.send(hello()).await.unwrap();
+                slack.send(ending.clone()).await.unwrap();
+                ends.push(slack);
+            }
+            let offsets = connect_offsets(socket, Duration::from_secs(60)).await;
+            assert_eq!(offsets.len(), 6, "{ending:?}: {offsets:?}");
+            assert_backs_off(&gaps(&offsets));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn link_disabled_logs_an_error_and_retries_after_the_max_delay() {
+        let (logs, _guard) = Logs::capture();
+        let socket = Arc::new(FakeSocket::default());
+        let mut slack = socket.accept().await;
+        slack.send(hello()).await.unwrap();
+        slack.send(disconnect("link_disabled")).await.unwrap();
+        let offsets = connect_offsets(socket, Backoff::MAX * 2).await;
+        assert_eq!(offsets, [Duration::ZERO, Backoff::MAX]);
+        let logs = logs.text();
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("disabled socket mode"), "{logs}");
     }
 
     /// Answers after `delay`, recording the most answers running at once.
