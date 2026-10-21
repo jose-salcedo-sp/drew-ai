@@ -12,21 +12,18 @@ pub const CLASSIFY_PROMPT_VERSION: &str = "classify-v1";
 
 const QUESTION_ID: &str = "category";
 
-const OPTIONS: [(CategoryKind, &str, &str); 4] = [
-    (CategoryKind::Boolean, "boolean", "A yes or no answer"),
+const OPTIONS: [(CategoryKind, &str); 4] = [
+    (CategoryKind::Boolean, "A yes or no answer"),
     (
         CategoryKind::Choice,
-        "choice",
         "Picking one of two or more options named in the question",
     ),
     (
         CategoryKind::Ranking,
-        "ranking",
         "Ordering several items named in the question by a stated criterion",
     ),
     (
         CategoryKind::Open,
-        "open",
         "An explanation, a how-to, or any other free-form answer",
     ),
 ];
@@ -58,7 +55,12 @@ impl Classify {
     fn request(question: &Question) -> DecisionRequest {
         let options = OPTIONS
             .iter()
-            .map(|(_, name, description)| ((*name).to_owned(), Some((*description).to_owned())))
+            .map(|(category, description)| {
+                (
+                    category.as_str().to_owned(),
+                    Some((*description).to_owned()),
+                )
+            })
             .collect();
         DecisionRequest {
             state: question.as_str().to_owned(),
@@ -80,11 +82,7 @@ fn parse(response: &DecisionResponse) -> Result<(CategoryKind, Probability), Dec
     let (choice, probability) = response
         .choice(QUESTION_ID)
         .map_err(|error| invalid(error.to_string()))?;
-    let category = OPTIONS
-        .iter()
-        .find(|(_, name, _)| *name == choice)
-        .map(|(category, _, _)| *category)
-        .ok_or_else(|| invalid(format!("unknown category {choice:?}")))?;
+    let category = CategoryKind::try_from(choice).map_err(|error| invalid(error.to_string()))?;
     Ok((category, probability))
 }
 

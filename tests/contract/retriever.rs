@@ -188,7 +188,7 @@ mod hybrid {
     use std::sync::Arc;
 
     use drew::{
-        domain::{Chunk, Sensitivity},
+        domain::Chunk,
         llm::{EmbedPurpose, Embedder, fakes::HashEmbedder},
         retrieval::{
             Retriever,
@@ -227,11 +227,6 @@ mod hybrid {
             .await
             .unwrap()
             .remove(0);
-        let sensitivity = match chunk.labels.sensitivity {
-            Sensitivity::Public => "public",
-            Sensitivity::Internal => "internal",
-            Sensitivity::Confidential => "confidential",
-        };
         let model = HashEmbedder.model();
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
@@ -247,7 +242,7 @@ mod hybrid {
         .bind(chunk.authoritative)
         .bind(&chunk.labels.acl)
         .bind(&chunk.labels.customer)
-        .bind(sensitivity)
+        .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))
         .bind(&model.id)
         .bind(&model.version)
