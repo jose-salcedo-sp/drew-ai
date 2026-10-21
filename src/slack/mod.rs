@@ -211,6 +211,12 @@ struct Placeholder {
     ts: String,
 }
 
+impl Placeholder {
+    async fn replace(&self, api: &dyn SlackApi, text: &str) -> eros::Result<()> {
+        api.update_message(&self.channel, &self.ts, text).await
+    }
+}
+
 /// Event tasks: every one is tracked, at most `MAX_CONCURRENT_EVENTS` run at once, and at most
 /// `MAX_QUEUED_EVENTS` more wait. Each posts its placeholder before it waits.
 struct EventTasks {
@@ -258,10 +264,12 @@ impl EventTasks {
                 .acquire_owned()
                 .await
                 .expect("the event semaphore is never closed");
-            let answered = answer(&state, api.as_ref(), ask, &placeholder).await;
-            // Not a drop guard: an aborted task's placeholder must stay listed for the restart notice.
+            let text = answer_text(&state, ask).await;
+            // Removed by hand, not by a drop guard, so an aborted task stays listed for the restart
+            // notice; and before the update, since once its request may have reached Slack, a
+            // restart notice could overwrite the answer.
             lock(&unanswered).remove(&task::id());
-            answered
+            placeholder.replace(api.as_ref(), &text).await
         });
     }
 
@@ -299,11 +307,10 @@ impl EventTasks {
             return;
         }
         let notices = unanswered.values().map(|placeholder| async {
-            let updated = self
-                .api
-                .update_message(&placeholder.channel, &placeholder.ts, RESTARTED_REPLY)
-                .await;
-            if let Err(error) = updated {
+            if let Err(error) = placeholder
+                .replace(self.api.as_ref(), RESTARTED_REPLY)
+                .await
+            {
                 tracing::warn!(error = format!("{error:#?}"), "slack restart notice failed");
             }
         });
@@ -340,21 +347,14 @@ async fn handle_event(state: &AppState, api: &dyn SlackApi, event: &Value) -> er
         return Ok(());
     };
     let placeholder = ask.post_placeholder(api).await?;
-    answer(state, api, ask, &placeholder).await
+    let text = answer_text(state, ask).await;
+    placeholder.replace(api, &text).await
 }
 
-async fn answer(
-    state: &AppState,
-    api: &dyn SlackApi,
-    ask: Ask,
-    placeholder: &Placeholder,
-) -> eros::Result<()> {
+async fn answer_text(state: &AppState, ask: Ask) -> String {
     let report = state.answerer.answer(ask.question).await;
     let user = UserId(format!("slack:{}", ask.user));
-    let text = persist_and_render(state, &user, &report).await;
-    api.update_message(&placeholder.channel, &placeholder.ts, &text)
-        .await?;
-    Ok(())
+    persist_and_render(state, &user, &report).await
 }
 
 /// Slack replies go to shared channels, so a failure shows only the run id; the detail goes to the log.

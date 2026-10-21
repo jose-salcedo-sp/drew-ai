@@ -585,8 +585,8 @@ mod socket {
         (started.elapsed(), alongside)
     }
 
-    /// Posts like `FakeSlack`; an update never finishes.
-    struct HangingUpdates(FakeSlack);
+    /// Posts like `FakeSlack`; an update reaches it, but the reply never comes back.
+    struct HangingUpdates(Arc<FakeSlack>);
 
     #[async_trait]
     impl SlackApi for HangingUpdates {
@@ -603,9 +603,26 @@ mod socket {
             self.0.post_message(channel, thread_ts, text).await
         }
 
-        async fn update_message(&self, _: &str, _: &str, _: &str) -> eros::Result<()> {
+        async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()> {
+            self.0.update_message(channel, ts, text).await?;
             std::future::pending().await
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_already_sent_at_abort_is_not_overwritten_by_a_restart_notice() {
+        let slack = Arc::new(FakeSlack::default());
+        serve_events_while(
+            Arc::new(HangingUpdates(Arc::clone(&slack))),
+            canned(answered()),
+            &[mention()],
+            Duration::from_secs(1),
+            async {},
+        )
+        .await;
+        let updates = slack.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert!(updates[0].2.contains("Run "), "{updates:?}");
     }
 
     fn texts(messages: &[(String, Option<String>, String)], text: &str) -> usize {
@@ -741,7 +758,7 @@ mod socket {
         let (logs, _guard) = Logs::capture();
         let stop_after = Duration::from_secs(1);
         let (ran, ()) = serve_events_while(
-            Arc::new(HangingUpdates(FakeSlack::default())),
+            Arc::new(HangingUpdates(Arc::default())),
             Arc::new(SlowAnswerer::new(Duration::from_secs(3600))),
             &[mention(), mention()],
             stop_after,
