@@ -20,6 +20,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Slack pings a healthy connection well within this; silence this long means a half-open link.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A WebSocket-shaped message stream and sink; lets tests use an in-memory duplex in place of a socket.
 pub trait Transport:
     Stream<Item = Result<Message, tungstenite::Error>>
     + Sink<Message, Error = tungstenite::Error>
@@ -34,14 +35,19 @@ impl<T> Transport for T where
 {
 }
 
+/// An open Socket Mode link.
 pub type Connection = Pin<Box<dyn Transport>>;
 
 /// Opens the WebSocket at the URL `apps.connections.open` returned.
 #[async_trait]
 pub trait Connector: Send + Sync {
+    /// # Errors
+    ///
+    /// When the handshake fails or takes longer than its connect timeout.
     async fn connect(&self, url: &str) -> eros::Result<Connection>;
 }
 
+/// The production [`Connector`], over TLS.
 pub struct WebSocketConnector;
 
 #[async_trait]
@@ -86,7 +92,9 @@ pub struct Backoff {
 }
 
 impl Backoff {
+    /// The delay after the first failure.
     pub const INITIAL: Duration = Duration::from_secs(1);
+    /// The longest delay.
     pub const MAX: Duration = Duration::from_secs(60);
     /// The least wait between connects, so even sessions that each count as healthy cannot loop.
     pub const FLOOR: Duration = Duration::from_millis(500);

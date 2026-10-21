@@ -1,6 +1,10 @@
 //! Developer-facing Slack bot over Socket Mode, sharing the HTTP API's answerer and run store.
+//!
+//! This module owns the Slack side only: the Web API client ([`api`]), the Socket Mode session ([`socket`]) and
+//! mrkdwn rendering ([`render`]). Runs are stored under `slack:{user_id}`. Slack is never a corpus source.
 
 pub mod api;
+/// In-memory [`api::SlackApi`] and [`socket::Connector`] for tests.
 #[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod render;
@@ -34,21 +38,29 @@ use self::{
     socket::{Backoff, Connector, Ending, WebSocketConnector},
 };
 
+/// Slack credentials. Both set turns the bot on; both unset or empty leaves it off.
 #[derive(Debug, clap::Args)]
 pub struct SlackArgs {
+    /// App-level token (`xapp-`), for opening Socket Mode connections.
     #[arg(long, env = "SLACK_APP_TOKEN", hide_env_values = true)]
     pub app_token: Option<String>,
+    /// Bot token (`xoxb-`), for posting and updating messages.
     #[arg(long, env = "SLACK_BOT_TOKEN", hide_env_values = true)]
     pub bot_token: Option<String>,
 }
 
+/// Answers mentions and direct messages in a thread, persisting each run like the HTTP API does.
 pub struct Bot {
     api: Arc<dyn SlackApi>,
     connector: Arc<dyn Connector>,
 }
 
 impl Bot {
-    /// An empty token counts as unset, as in `.env.example`.
+    /// `None` when both tokens are unset. An empty token counts as unset, as in `.env.example`.
+    ///
+    /// # Errors
+    ///
+    /// When only one token is set, or the HTTP client cannot be built.
     pub fn from_args(args: &SlackArgs) -> eros::Result<Option<Self>> {
         let set = |token: &Option<String>| token.clone().filter(|t| !t.trim().is_empty());
         match (set(&args.app_token), set(&args.bot_token)) {
@@ -63,6 +75,7 @@ impl Bot {
         }
     }
 
+    /// A bot over the given ports; tests pass fakes.
     pub fn new(api: Arc<dyn SlackApi>, connector: Arc<dyn Connector>) -> Self {
         Self { api, connector }
     }

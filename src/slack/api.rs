@@ -11,10 +11,21 @@ const SLACK_API: &str = "https://slack.com/api/";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The Web API methods the bot calls.
 #[async_trait]
 pub trait SlackApi: Send + Sync {
+    /// `apps.connections.open`: a one-time Socket Mode WebSocket URL.
+    ///
+    /// # Errors
+    ///
+    /// When the call fails or Slack answers `ok: false`.
     async fn open_connection(&self) -> eros::Result<String>;
 
+    /// `chat.postMessage`, in `thread_ts`'s thread when given. Returns the new message's `ts`.
+    ///
+    /// # Errors
+    ///
+    /// When the call fails or Slack answers `ok: false`.
     async fn post_message(
         &self,
         channel: &str,
@@ -22,9 +33,15 @@ pub trait SlackApi: Send + Sync {
         text: &str,
     ) -> eros::Result<String>;
 
+    /// `chat.update`: replaces the text of the message at `ts`.
+    ///
+    /// # Errors
+    ///
+    /// When the call fails or Slack answers `ok: false`.
     async fn update_message(&self, channel: &str, ts: &str, text: &str) -> eros::Result<()>;
 }
 
+/// [`SlackApi`] over HTTPS, with connect and request timeouts.
 pub struct SlackClient {
     http: HttpClient,
     base_url: String,
@@ -33,6 +50,9 @@ pub struct SlackClient {
 }
 
 impl SlackClient {
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
     pub fn new(app_token: String, bot_token: String) -> eros::Result<Self> {
         Ok(Self {
             http: http_client()?,
