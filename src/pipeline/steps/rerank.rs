@@ -16,6 +16,7 @@ use crate::{
 
 use super::{Candidates, MAX_STATE_CHARS, Reranked, ranked};
 
+/// Recorded as the trace entry's prompt version; bump on any change to the relevance question.
 pub const RERANK_PROMPT_VERSION: &str = "rerank-v2";
 
 const QUESTION_ID: &str = "relevant";
@@ -42,6 +43,7 @@ pub struct Rerank<TCategory> {
 }
 
 impl<TCategory> Rerank<TCategory> {
+    /// The default evidence penalty and no threshold.
     pub fn new(top_k: usize, candidates: usize, system_one: Option<Arc<dyn SystemOne>>) -> Self {
         Self {
             top_k,
@@ -53,6 +55,7 @@ impl<TCategory> Rerank<TCategory> {
         }
     }
 
+    /// Every setting from the config, plus the step's threshold for its category.
     pub fn from_config(
         config: &RerankConfig,
         threshold: Option<Probability>,
@@ -65,10 +68,12 @@ impl<TCategory> Rerank<TCategory> {
         }
     }
 
+    /// Matches kept.
     pub fn top_k(&self) -> usize {
         self.top_k
     }
 
+    /// Matches System One judges.
     pub fn candidates(&self) -> usize {
         self.candidates
     }

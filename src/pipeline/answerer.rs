@@ -32,20 +32,29 @@ const EXCERPT_CHARS: usize = 200;
 
 /// The one place where runtime data becomes a type. See `docs/design.md` section 5.4.
 pub enum Classified {
+    /// Continues through [`Decisive<Boolean>`].
     Boolean(Run<Boolean, Reranked>),
+    /// Not produced until `Answer<Choice>` exists; `choice` questions take the `Open` arm.
     Choice(Run<Choice, Reranked>),
+    /// Not produced until `Answer<Ranking>` exists; `ranking` questions take the `Open` arm.
     Ranking(Run<Ranking, Reranked>),
+    /// Continues through [`OpenEnded`].
     Open(Run<Open, Reranked>),
 }
 
+/// Everything [`PipelineAnswerer::from_args`] needs besides the database.
 #[derive(Clone, Debug, clap::Args)]
 pub struct PipelineArgs {
+    /// The tunables file.
     #[command(flatten)]
     pub config: ConfigArgs,
+    /// The query embedder; must match the corpus's model.
     #[command(flatten)]
     pub embed: EmbedArgs,
+    /// The `Explain` LLM.
     #[command(flatten)]
     pub chat: ChatArgs,
+    /// System One, for `Classify`, `Rerank` and `Answer`.
     #[command(flatten)]
     pub system_one: SystemOneArgs,
 }
@@ -55,11 +64,13 @@ pub struct PipelineArgs {
 pub struct Models {
     /// `None` when the retriever was built outside `from_args`.
     pub embedding: Option<ModelRef>,
+    /// The `Explain` LLM.
     pub explain: ModelRef,
     /// Classify, Rerank and Answer. `None`: every question is `open` and reranking keeps retrieval order.
     pub system_one: Option<ModelRef>,
 }
 
+/// The production [`Answerer`]: builds every step and pipeline once, then answers questions concurrently.
 pub struct PipelineAnswerer {
     config: PipelineConfig,
     embedding: Option<ModelRef>,
@@ -133,6 +144,8 @@ impl PipelineAnswerer {
         )
     }
 
+    /// Rebuilds the steps with `config`'s thresholds and rerank settings. Retrieval settings are fixed when the
+    /// retriever is built.
     pub fn with_config(self, config: PipelineConfig) -> Self {
         Self::build(
             config,
@@ -143,10 +156,12 @@ impl PipelineAnswerer {
         )
     }
 
+    /// The config the steps were built with.
     pub fn config(&self) -> &PipelineConfig {
         &self.config
     }
 
+    /// The models the steps call.
     pub fn models(&self) -> Models {
         Models {
             embedding: self.embedding.clone(),
@@ -160,6 +175,10 @@ impl PipelineAnswerer {
 
     /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify`, `Rerank` and `Answer`
     /// on System One when configured. Every tunable comes from the pipeline config file.
+    ///
+    /// # Errors
+    ///
+    /// When the config does not load or the embedder cannot be built.
     pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> eros::Result<Self> {
         let config = args.config.load()?;
         let embedder = llm::embedder(&args.embed).await?;

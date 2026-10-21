@@ -10,6 +10,7 @@ use crate::{
 
 use super::{MAX_STATE_CHARS, Reranked};
 
+/// Recorded as the trace entry's prompt version; bump on any change to the question System One is asked.
 pub const ANSWER_PROMPT_VERSION: &str = "answer-boolean-v1";
 
 const QUESTION_ID: &str = "answer";
@@ -22,6 +23,7 @@ pub struct Answer<TCategory> {
 }
 
 impl<TCategory> Answer<TCategory> {
+    /// Without a System One the step fails every run. `threshold` applies to the verdict's confidence.
     pub fn new(system_one: Option<Arc<dyn SystemOne>>, threshold: Option<Probability>) -> Self {
         Self {
             system_one,

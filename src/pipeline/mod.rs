@@ -1,5 +1,11 @@
 //! Typestate pipeline with a Writer-style trace. See `docs/design.md` section 5.
 //!
+//! This module owns the state machine: a [`Run`] carries its category and state as types, [`Run::then`] applies a
+//! [`Step`], times it, appends its [`trace::TraceEntry`] and checks its threshold, and a decline or failure becomes
+//! [`Halted`] with the trace so far. [`steps`] holds the concrete steps and the per-category pipeline types;
+//! [`answerer::PipelineAnswerer`] drives a question through them; [`report`] is what is persisted and shown. Steps never
+//! see the trace, and model clients stay behind the ports in [`crate::llm`] and [`crate::retrieval`].
+//!
 //! Invalid pipelines do not compile. There is no `Answer<Open>` step, so `Decisive<Open>` is not a pipeline:
 //!
 //! ```compile_fail,E0599
@@ -98,15 +104,21 @@ use crate::{
 
 use self::trace::{StepOutcome, Trace, TraceEntry, TraceRecord};
 
+/// A question category as a type. Implemented by [`Unclassified`] and one marker per [`CategoryKind`].
 pub trait Category: Send + Sync + 'static {
     /// `None` before classification.
     const KIND: Option<CategoryKind>;
 }
 
+/// Category of a run before `Classify`; only the classification join moves a run out of it.
 pub struct Unclassified;
+/// Marker for [`CategoryKind::Boolean`] runs.
 pub struct Boolean;
+/// Marker for [`CategoryKind::Choice`] runs.
 pub struct Choice;
+/// Marker for [`CategoryKind::Ranking`] runs.
 pub struct Ranking;
+/// Marker for [`CategoryKind::Open`] runs.
 pub struct Open;
 
 impl Category for Unclassified {
@@ -127,6 +139,8 @@ category!(Boolean, Choice, Ranking, Open);
 #[derive(Clone, Copy, Debug)]
 pub struct Asked;
 
+/// One question's progress through the pipeline. `TCategory` is a [`Category`] marker and `TState` is the last
+/// step's output, so a step applies only where its input type matches.
 pub struct Run<TCategory, TState> {
     id: RunId,
     question: Question,
@@ -136,6 +150,7 @@ pub struct Run<TCategory, TState> {
 }
 
 impl Run<Unclassified, Asked> {
+    /// A fresh run with a new [`RunId`] and an empty trace.
     pub fn new(question: Question) -> Self {
         Self {
             id: RunId::new(),
@@ -150,10 +165,15 @@ impl Run<Unclassified, Asked> {
 /// A step is generic over the categories it supports (`Answer<Boolean>` is a step, `Answer<Open>` is not),
 /// rather than `Step` being generic over the category: that keeps the blanket `Pipeline` impl coherent with `Seq`.
 pub trait Step: Send + Sync {
+    /// Recorded as [`trace::TraceEntry::step`] and [`Halted::at`]; snake case.
     const NAME: &'static str;
+    /// The run category this step applies to.
     type Category: Category;
+    /// The run state the step consumes.
     type Input: Send;
+    /// The run state the step produces.
     type Output: Send;
+    /// The step's own trace data.
     type Record: Into<TraceRecord> + Send;
 
     /// Minimum score to continue. A step with a threshold must return a score.
@@ -161,6 +181,8 @@ pub trait Step: Send + Sync {
         None
     }
 
+    /// Does the step's work. A domain decline returns [`StepError::decline`] with the record attached; any other
+    /// error is a failure.
     fn run(
         &self,
         question: &Question,
@@ -168,15 +190,22 @@ pub trait Step: Send + Sync {
     ) -> impl Future<Output = Result<Scored<Self::Output, Self::Record>, StepError>> + Send;
 }
 
+/// A step's successful result: its output, its trace record, and what [`Run::then`] checks and records.
 pub struct Scored<TOutput, TRecord> {
+    /// The next run state.
     pub output: TOutput,
+    /// Appended to the trace.
     pub record: TRecord,
+    /// Compared with [`Step::threshold`]; required when the step has one.
     pub score: Option<Probability>,
+    /// The model the step called, if any.
     pub model: Option<ModelRef>,
+    /// Version of the prompt sent to `model`.
     pub prompt_version: Option<&'static str>,
 }
 
 impl<TOutput, TRecord> Scored<TOutput, TRecord> {
+    /// Unscored, with no model.
     pub fn new(output: TOutput, record: TRecord) -> Self {
         Self {
             output,
@@ -187,6 +216,7 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
         }
     }
 
+    /// Sets [`Scored::score`].
     pub fn with_score(self, score: Probability) -> Self {
         Self {
             score: Some(score),
@@ -194,6 +224,7 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
         }
     }
 
+    /// Sets the model and the prompt version sent to it.
     pub fn with_model(self, model: ModelRef, prompt_version: &'static str) -> Self {
         Self {
             model: Some(model),
@@ -203,13 +234,17 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
     }
 }
 
+/// Why a run declined: Drew answers "can't answer with certainty" rather than guess.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum DeclineReason {
+    /// A step's score was below its threshold; set by [`Run::then`], never by a step.
     LowConfidence,
     /// Model output failed DTO deserialization or `TryFrom` conversion.
     InvalidModelOutput(String),
+    /// Retrieval or reranking left no source to answer from.
     NoSources,
+    /// The answer could not be verified against this run's sources, or the model found no answer in them.
     Unverified(String),
     /// `Explain` found that the sources it would cite contradict System One's verdict.
     ContradictsVerdict,
@@ -218,19 +253,27 @@ pub enum DeclineReason {
 /// A step that cannot produce its output. The record, when present, keeps the raw model output in the trace.
 #[derive(Debug)]
 pub struct StepError {
+    /// Decline or failure.
     pub kind: StepErrorKind,
+    /// Appended to the trace in place of the step's normal record.
     pub record: Option<TraceRecord>,
+    /// The model the step called, if any.
     pub model: Option<ModelRef>,
+    /// Version of the prompt sent to `model`.
     pub prompt_version: Option<&'static str>,
 }
 
+/// Whether a [`StepError`] is a domain decline or a failure; the run's status follows from it.
 #[derive(Debug)]
 pub enum StepErrorKind {
+    /// The step ran but cannot answer with certainty.
     Decline(DeclineReason),
+    /// Anything else, such as a model or database error; any `?` in a step produces this.
     Failed(eros::ErrorUnion),
 }
 
 impl StepError {
+    /// A decline with no record yet.
     pub fn decline(reason: DeclineReason) -> Self {
         Self {
             kind: StepErrorKind::Decline(reason),
@@ -240,6 +283,7 @@ impl StepError {
         }
     }
 
+    /// Attaches the trace record, so the raw model output survives a decline.
     pub fn with_record(self, record: impl Into<TraceRecord>) -> Self {
         Self {
             record: Some(record.into()),
@@ -247,6 +291,7 @@ impl StepError {
         }
     }
 
+    /// Sets the model and the prompt version sent to it.
     pub fn with_model(self, model: ModelRef, prompt_version: &'static str) -> Self {
         Self {
             model: Some(model),
@@ -267,52 +312,75 @@ impl<E: Into<eros::ErrorUnion>> From<E> for StepError {
     }
 }
 
+/// A run that stopped at a step: declined or failed. It still carries the whole trace up to and including that step.
 #[derive(Debug)]
 pub struct Halted {
+    /// The run's id.
     pub id: RunId,
+    /// The question asked.
     pub question: Question,
+    /// Every entry so far, including the halting step's.
     pub trace: Trace,
     /// `None` when the run halted before classification.
     pub category: Option<CategoryKind>,
+    /// [`Step::NAME`] of the step that halted.
     pub at: &'static str,
+    /// Why it halted.
     pub halt: Halt,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+/// How a run halted.
 pub enum Halt {
+    /// Drew cannot answer with certainty.
     Declined {
+        /// Why.
         reason: DeclineReason,
+        /// The step's score, when the decline was a threshold miss.
         score: Option<Probability>,
+        /// The step's threshold, if it has one.
         threshold: Option<Probability>,
     },
+    /// An error stopped the run.
     Failed {
+        /// The error rendered with `{:#?}`: root, causes and context. Audit data; never shown to users.
         error: String,
     },
 }
 
 impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
+    /// The run's id, fixed at [`Run::new`].
     pub fn id(&self) -> RunId {
         self.id
     }
 
+    /// The question asked.
     pub fn question(&self) -> &Question {
         &self.question
     }
 
+    /// The last step's output.
     pub fn state(&self) -> &TState {
         &self.state
     }
 
+    /// Every step entry so far, in the order they were appended.
     pub fn trace(&self) -> &Trace {
         &self.trace
     }
 
+    /// Ends the run, for building its report.
     pub fn into_parts(self) -> (RunId, Question, TState, Trace) {
         (self.id, self.question, self.state, self.trace)
     }
 
     /// Times the step, appends its trace entry, checks its threshold, and continues or halts.
+    ///
+    /// # Errors
+    ///
+    /// [`Halted`] when the step declines or fails, its score is below its threshold, or it has a threshold but
+    /// returned no score.
     pub async fn then<TStep>(self, step: &TStep) -> Result<Run<TCategory, TStep::Output>, Halted>
     where
         TStep: Step<Category = TCategory, Input = TState>,
@@ -345,7 +413,12 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
         }
     }
 
-    /// Runs two steps concurrently on the same state. Both entries are traced even when one halts.
+    /// Runs two steps concurrently on the same state. Both entries are traced even when one halts, left first, with
+    /// `group` as their [`trace::TraceEntry::group`].
+    ///
+    /// # Errors
+    ///
+    /// [`Halted`] as for [`Run::then`]; when both halt, the left step's halt is reported.
     pub async fn both<TLeft, TRight>(
         self,
         group: &'static str,
@@ -509,10 +582,14 @@ fn outcome_of(halt: &Halt) -> StepOutcome {
 
 /// A typed path through the state machine. Every `Step` is a one-transition pipeline.
 pub trait Pipeline: Send + Sync {
+    /// The run category the pipeline applies to.
     type Category: Category;
+    /// The run state the first step consumes.
     type Input: Send;
+    /// The run state the last step produces.
     type Output: Send;
 
+    /// Applies every step in order, stopping at the first halt.
     fn drive(
         &self,
         run: Run<Self::Category, Self::Input>,
