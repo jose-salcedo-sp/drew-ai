@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [lints.clippy]
 # `Halted` carries the whole trace by design; halting is the rare path.
 result_large_err = "allow"
@@ -15,11 +18,16 @@ unimplemented = "deny"
 dbg_macro = "deny"
 # A `std` lock guard held across `.await` blocks the runtime thread and can deadlock it.
 await_holding_lock = "deny"
+# A parameter that is only read is borrowed. `avoid-breaking-exported-api = false` (clippy.toml) extends this to `pub` fns.
+needless_pass_by_value = "deny"
+# `Arc::clone(&x)` marks the cheap clones, so every remaining `.clone()` is a deep copy worth reading.
+clone_on_ref_ptr = "deny"
 
 [dependencies]
 async-trait = "0.1.92"
 aws-config = { version = "1.12.0", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = "1.148.0"
+# Without default features: the default `rustls` feature is the legacy hyper 0.14 / rustls 0.21 client.
+aws-sdk-bedrockruntime = { version = "1.148.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 # Names `Document`, the JSON type of Bedrock tool schemas and tool-use input; the SDK does not re-export it.
 aws-smithy-types = "1.8.1"
 axum = "0.8.9"
@@ -43,7 +51,14 @@ indicatif = "0.18.6"
 console = "0.16.6"
 eros = "0.8.1"
 
+[features]
+# The fakes in `*/fakes.rs`, for integration tests; release builds leave them out.
+testing = []
+
 [dev-dependencies]
+drew = { path = ".", features = ["testing"] }
 http-body-util = "0.1.5"
+# Paused time, so timeout and backoff tests run without real sleeps.
+tokio = { version = "1.53.2", features = ["test-util"] }
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"

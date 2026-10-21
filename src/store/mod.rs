@@ -1,6 +1,7 @@
 //! Postgres + pgvector. Schema lives in `migrations/`; queries use runtime-checked `sqlx::query`, not the macros.
 
 pub mod chunks;
+#[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod runs;
 

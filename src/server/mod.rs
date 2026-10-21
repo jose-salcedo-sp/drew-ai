@@ -10,7 +10,7 @@ mod fixtures;
 #[cfg(test)]
 mod tests;
 
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, future::IntoFuture, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -85,32 +85,25 @@ pub async fn run(args: Args) -> eros::Result<()> {
         keys: Arc::new(args.api_keys),
         admins: Arc::new(args.admin_users),
     };
-    if let Some(bot) = crate::slack::Bot::from_args(&args.slack)? {
-        let shutdown = shutdown_handle();
-        let bot_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = bot.run(bot_state, shutdown).await {
-                tracing::error!(error = format!("{error:#?}"), "slack bot stopped");
-            }
-        });
-    }
+    let bot = crate::slack::Bot::from_args(&args.slack)?;
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("binding {}", args.bind))?;
     tracing::info!(addr = %listener.local_addr()?, "drew serve listening");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
-}
-
-fn shutdown_handle() -> tokio::sync::watch::Receiver<bool> {
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let serve = axum::serve(listener, router(state.clone())).with_graceful_shutdown(async move {
         shutdown_signal().await;
-        let _ = tx.send(true);
+        // Fails only when the bot is off, so nothing is listening.
+        let _ = stop.send(true);
     });
-    rx
+    let slack = async {
+        if let Some(bot) = bot {
+            bot.run(state, shutdown).await;
+        }
+    };
+    let (served, ()) = tokio::join!(serve.into_future(), slack);
+    served?;
+    Ok(())
 }
 
 /// As PID 1 in a container the process gets no default SIGTERM handler, so it has to exit on SIGTERM itself.

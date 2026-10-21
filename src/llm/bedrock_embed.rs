@@ -1,6 +1,9 @@
 //! `Embedder` over Bedrock (Titan Text Embeddings v2 or Cohere Embed v3, 1024 dimensions).
 
+use std::time::Duration;
+
 use async_trait::async_trait;
+use aws_config::{BehaviorVersion, timeout::TimeoutConfig};
 use aws_sdk_bedrockruntime::{Client, error::DisplayErrorContext, primitives::Blob};
 use eros::{Context, bail};
 use futures::{StreamExt, TryStreamExt, stream};
@@ -16,6 +19,9 @@ const COHERE_MAX_CHARS: usize = 2_048;
 const COHERE_MAX_BATCH: usize = 96;
 /// Titan embeds one text per call, so calls run concurrently.
 const CONCURRENT_CALLS: usize = 8;
+/// One call embeds at most a `COHERE_MAX_BATCH` batch; this bounds it including its retries.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct EmbedArgs {
@@ -152,14 +158,26 @@ pub struct BedrockEmbedder {
 }
 
 impl BedrockEmbedder {
-    pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
-        let family = Family::of(&args.embed_model)?;
-        let config = aws_config::load_from_env().await;
+    pub fn new(client: Client, model_id: impl Into<String>) -> eros::Result<Self> {
+        let model_id = model_id.into();
         Ok(Self {
-            client: Client::new(&config),
-            model_id: args.embed_model.clone(),
-            family,
+            family: Family::of(&model_id)?,
+            client,
+            model_id,
         })
+    }
+
+    /// Region and credentials come from the standard AWS environment and profile chain.
+    pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
+        let timeouts = TimeoutConfig::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .operation_timeout(OPERATION_TIMEOUT)
+            .build();
+        let config = aws_config::defaults(BehaviorVersion::latest())
+            .timeout_config(timeouts)
+            .load()
+            .await;
+        Self::new(Client::new(&config), &args.embed_model)
     }
 
     async fn invoke(&self, request: Request) -> eros::Result<Vec<Vec<f32>>> {

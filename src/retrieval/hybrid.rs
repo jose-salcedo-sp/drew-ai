@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Score, Sensitivity, SourceKind},
+    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
 
-use super::{Retrieved, Retriever};
+use super::{Relevance, Retrieved, Retriever};
 
 /// Retrieval knobs; `drew eval` tunes them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -345,7 +345,7 @@ impl Expansion {
         match self.position.get(&chunk.id) {
             Some(&i) => {
                 let existing = &mut self.out[i];
-                existing.score = Score(existing.score.0.max(score));
+                existing.score = Relevance(existing.score.0.max(score));
                 if context_for.is_none() {
                     existing.context_for = None;
                 }
@@ -358,7 +358,7 @@ impl Expansion {
                     .or_default() += 1;
                 self.out.push(Retrieved {
                     chunk: chunk.clone(),
-                    score: Score(score),
+                    score: Relevance(score),
                     context_for: context_for.cloned(),
                 });
             }

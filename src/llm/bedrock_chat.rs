@@ -1,6 +1,9 @@
 //! `ChatModel` over the Bedrock Converse API, used by `Explain`.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
+use aws_config::{BehaviorVersion, timeout::TimeoutConfig};
 use aws_sdk_bedrockruntime::{
     Client,
     error::DisplayErrorContext,
@@ -19,6 +22,9 @@ use super::{ChatModel, ChatRequest, ChatResponse, ModelRef};
 
 /// The tool the model is forced to call when a request has a `json_schema`; its input is the response.
 const RESPOND_TOOL: &str = "respond";
+/// A long structured answer can take minutes to generate; this bounds the call including its retries.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ChatArgs {
@@ -46,7 +52,14 @@ impl BedrockChat {
 
     /// Region and credentials come from the standard AWS environment and profile chain.
     pub async fn from_args(args: &ChatArgs) -> Self {
-        let config = aws_config::load_from_env().await;
+        let timeouts = TimeoutConfig::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .operation_timeout(OPERATION_TIMEOUT)
+            .build();
+        let config = aws_config::defaults(BehaviorVersion::latest())
+            .timeout_config(timeouts)
+            .load()
+            .await;
         Self::new(Client::new(&config), &args.explain_model)
     }
 }
@@ -233,12 +246,12 @@ mod tests {
             .unwrap()
     }
 
-    fn tool_use(name: &str, input: Value) -> ContentBlock {
+    fn tool_use(name: &str, input: &Value) -> ContentBlock {
         ContentBlock::ToolUse(
             ToolUseBlock::builder()
                 .tool_use_id("t1")
                 .name(name)
-                .input(to_document(&input))
+                .input(to_document(input))
                 .build()
                 .unwrap(),
         )
@@ -295,7 +308,7 @@ mod tests {
             StopReason::ToolUse,
             vec![
                 ContentBlock::Text("Calling the tool.".into()),
-                tool_use(RESPOND_TOOL, input.clone()),
+                tool_use(RESPOND_TOOL, &input),
             ],
         );
 
@@ -313,7 +326,7 @@ mod tests {
         let output = output(
             StopReason::EndTurn,
             vec![
-                tool_use("other", json!({})),
+                tool_use("other", &json!({})),
                 ContentBlock::Text("I cannot".into()),
                 ContentBlock::Text(" comply.".into()),
             ],

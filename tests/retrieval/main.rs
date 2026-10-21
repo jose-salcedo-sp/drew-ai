@@ -8,10 +8,10 @@ mod seed;
 use std::sync::Arc;
 
 use drew::{
-    domain::{ChunkId, Score, SourceKind},
+    domain::{ChunkId, SourceKind},
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
-        Retrieved, Retriever,
+        Relevance, Retrieved, Retriever,
         hybrid::{EmbeddingModelMismatch, HybridConfig, HybridRetriever},
     },
 };
@@ -276,7 +276,7 @@ async fn confluence_hits_expand_to_neighbouring_sections(pool: PgPool) {
     for neighbour in [&sections[1], &sections[3]] {
         let at = position(&results, neighbour).unwrap();
         assert_eq!(at, hit + if neighbour == &sections[1] { 1 } else { 2 });
-        assert_eq!(results[at].score, Score(hit_score.0.next_down()));
+        assert_eq!(results[at].score, Relevance(hit_score.0.next_down()));
     }
     for far in [&sections[0], &sections[4]] {
         assert_eq!(position(&results, far), None);

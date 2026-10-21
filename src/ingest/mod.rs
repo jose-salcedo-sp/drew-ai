@@ -171,6 +171,7 @@ async fn ingest_source(
     Ok(())
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub mod fakes {
     use async_trait::async_trait;
 

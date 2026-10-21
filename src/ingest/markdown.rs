@@ -240,7 +240,7 @@ pub fn chunks(file_url: &str, content: &str, authoritative: bool) -> eros::Resul
                     file_url.to_owned()
                 };
                 (
-                    unique(slug(title), &mut used),
+                    unique(&slug(title), &mut used),
                     Some(section.path.join(" > ")),
                     url,
                 )
@@ -340,8 +340,8 @@ fn slug(heading: &str) -> String {
     }
 }
 
-fn unique(slug: String, used: &mut HashSet<String>) -> String {
-    let mut candidate = slug.clone();
+fn unique(slug: &str, used: &mut HashSet<String>) -> String {
+    let mut candidate = slug.to_owned();
     let mut n = 2;
     while !used.insert(candidate.clone()) {
         candidate = format!("{slug}-{n}");

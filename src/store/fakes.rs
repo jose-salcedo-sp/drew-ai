@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -18,15 +21,18 @@ pub struct MemoryRunStore {
 #[async_trait]
 impl RunStore for MemoryRunStore {
     async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()> {
-        let run = StoredRun {
+        let mut runs = self
+            .runs
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it");
+        let Entry::Vacant(slot) = runs.entry(report.id) else {
+            eros::bail!("run {} already saved", report.id);
+        };
+        slot.insert(StoredRun {
             user: user.clone(),
             created_at: Utc::now(),
             report: report.clone(),
-        };
-        self.runs
-            .lock()
-            .expect("lock poisoned: a test thread panicked while holding it")
-            .insert(report.id, run);
+        });
         Ok(())
     }
 
@@ -37,6 +43,20 @@ impl RunStore for MemoryRunStore {
             .expect("lock poisoned: a test thread panicked while holding it")
             .get(&id)
             .cloned())
+    }
+}
+
+/// Fails every call, with a message like a database error's, for error-path tests.
+pub struct FailingRunStore;
+
+#[async_trait]
+impl RunStore for FailingRunStore {
+    async fn save(&self, _: &UserId, _: &RunReport) -> eros::Result<()> {
+        eros::bail!("pool timed out connecting to postgres://drew@db.internal:5432/drew")
+    }
+
+    async fn get(&self, _: RunId) -> eros::Result<Option<StoredRun>> {
+        eros::bail!("pool timed out connecting to postgres://drew@db.internal:5432/drew")
     }
 }
 

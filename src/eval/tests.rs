@@ -11,8 +11,8 @@ use super::{
 };
 use crate::{
     domain::{
-        AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Provenance, Question,
-        RunId, Score,
+        AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance,
+        Question, RunId,
     },
     pipeline::{
         DeclineReason,
@@ -22,9 +22,14 @@ use crate::{
             TraceEntry, TraceRecord,
         },
     },
+    retrieval::Relevance,
 };
 
 // ---- fixtures ----
+
+fn probability(value: f32) -> Probability {
+    Probability::new(value).unwrap()
+}
 
 fn chunk(id: &str) -> ChunkRef {
     ChunkRef {
@@ -38,7 +43,8 @@ fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
         .enumerate()
         .map(|(rank, id)| RankedChunk {
             chunk: chunk(id),
-            score: Score(1.0 - rank as f32 / 100.0),
+            score: Relevance(1.0 - rank as f32 / 100.0),
+            probability: None,
         })
         .collect()
 }
@@ -58,7 +64,7 @@ fn entry(step: &str, outcome: StepOutcome, record: Option<TraceRecord>) -> Trace
 
 fn passed(score: Option<f32>) -> StepOutcome {
     StepOutcome::Passed {
-        score: score.map(Score),
+        score: score.map(probability),
         threshold: None,
     }
 }
@@ -66,8 +72,8 @@ fn passed(score: Option<f32>) -> StepOutcome {
 fn low_confidence(score: f32, threshold: f32) -> StepOutcome {
     StepOutcome::Declined {
         reason: DeclineReason::LowConfidence,
-        score: Some(Score(score)),
-        threshold: Some(Score(threshold)),
+        score: Some(probability(score)),
+        threshold: Some(probability(threshold)),
     }
 }
 
@@ -155,7 +161,7 @@ fn answered(verdict: Option<Verdict>, cites: &[&str]) -> Outcome {
 fn yes(value: bool) -> Option<Verdict> {
     Some(Verdict::Boolean {
         yes: value,
-        confidence: Score(0.9),
+        confidence: probability(0.9),
     })
 }
 
@@ -911,7 +917,10 @@ fn tuning_results() -> Results {
 fn candidate(name: &str, thresholds: &[(&str, f32)]) -> Candidate {
     Candidate {
         name: name.into(),
-        thresholds: thresholds.iter().map(|(s, t)| ((*s).into(), *t)).collect(),
+        thresholds: thresholds
+            .iter()
+            .map(|(s, t)| ((*s).into(), probability(*t)))
+            .collect(),
         per_category: HashMap::new(),
     }
 }
@@ -920,9 +929,10 @@ fn candidate(name: &str, thresholds: &[(&str, f32)]) -> Candidate {
 fn tuning_reapplies_thresholds_to_recorded_scores() {
     let results = tuning_results();
     let mut lenient_choice = candidate("lenient-choice", &[("answer", 0.5)]);
-    lenient_choice
-        .per_category
-        .insert(CategoryKind::Choice, [("answer".to_owned(), 0.3)].into());
+    lenient_choice.per_category.insert(
+        CategoryKind::Choice,
+        [("answer".to_owned(), probability(0.3))].into(),
+    );
     let candidates = [
         candidate("none", &[]),
         candidate("answer-0.5", &[("answer", 0.5)]),
@@ -995,6 +1005,19 @@ fn tuning_table_highlights_launch_gate_candidates() {
 }
 
 #[test]
+fn a_candidate_threshold_outside_zero_to_one_is_rejected() {
+    for bad in [
+        r#"[{"name": "x", "thresholds": {"answer": 1.5}}]"#,
+        r#"[{"name": "x", "per_category": {"boolean": {"answer": -0.1}}}]"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Vec<Candidate>>(bad).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn tune_command_reads_results_and_candidate_files() {
     let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
@@ -1004,7 +1027,7 @@ fn tune_command_reads_results_and_candidate_files() {
         r#"[{"name": "strict", "thresholds": {"answer": 0.5}, "per_category": {"choice": {"answer": 0.3}}}]"#,
     )
     .unwrap();
-    run_tune(TuneArgs {
+    run_tune(&TuneArgs {
         results: dir.join("results.json"),
         candidates: dir.join("candidates.json"),
         out: Some(dir.join("tune.json")),

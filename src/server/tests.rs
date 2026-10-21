@@ -30,7 +30,7 @@ fn app(answerer: impl Answerer + 'static) -> App {
     let runs = Arc::new(MemoryRunStore::default());
     let state = AppState {
         answerer: Arc::new(answerer),
-        runs: runs.clone(),
+        runs: Arc::<MemoryRunStore>::clone(&runs),
         keys: Arc::new(format!("{DREW_KEY}:drew,{JOSE_KEY}:jose").parse().unwrap()),
         admins: Arc::new(AdminUsers::default()),
     };
@@ -102,7 +102,7 @@ async fn send(router: &Router, request: Request<Body>) -> Reply {
     }
 }
 
-fn chat(key: Option<&str>, body: Value) -> Request<Body> {
+fn chat(key: Option<&str>, body: &Value) -> Request<Body> {
     let mut request =
         Request::post("/v1/chat/completions").header(header::CONTENT_TYPE, "application/json");
     if let Some(key) = key {
@@ -142,8 +142,8 @@ async fn missing_or_unknown_key_is_unauthorized() {
         no_key,
         wrong_scheme,
         get("/v1/models", "sk-nobody"),
-        chat(None, ask("Is it?")),
-        chat(Some("sk-nobody"), ask("Is it?")),
+        chat(None, &ask("Is it?")),
+        chat(Some("sk-nobody"), &ask("Is it?")),
     ] {
         let reply = send(&app.router, request).await;
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
@@ -171,7 +171,7 @@ async fn lists_one_model() {
 #[tokio::test]
 async fn uses_only_the_last_user_message() {
     let recording = Arc::new(Recording::default());
-    let app = app(recording.clone());
+    let app = app(Arc::clone(&recording));
     let body = json!({
         "model": "drew-ai",
         "messages": [
@@ -183,7 +183,7 @@ async fn uses_only_the_last_user_message() {
             { "role": "system", "content": "Trailing system prompt." }
         ]
     });
-    let reply = send(&app.router, chat(Some(DREW_KEY), body)).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(
         *recording.questions.lock().unwrap(),
@@ -194,14 +194,14 @@ async fn uses_only_the_last_user_message() {
 #[tokio::test]
 async fn accepts_content_as_text_parts() {
     let recording = Arc::new(Recording::default());
-    let app = app(recording.clone());
+    let app = app(Arc::clone(&recording));
     let body = json!({
         "messages": [{ "role": "user", "content": [
             { "type": "text", "text": "Does AGR_USERS" },
             { "type": "text", "text": "hold role assignments?" }
         ] }]
     });
-    let reply = send(&app.router, chat(Some(DREW_KEY), body)).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(
         *recording.questions.lock().unwrap(),
@@ -212,7 +212,7 @@ async fn accepts_content_as_text_parts() {
 #[tokio::test]
 async fn rejects_unusable_requests() {
     let recording = Arc::new(Recording::default());
-    let app = app(recording.clone());
+    let app = app(Arc::clone(&recording));
     let image = json!({ "messages": [{ "role": "user", "content": [
         { "type": "image_url", "image_url": { "url": "https://example.test/a.png" } }
     ] }] });
@@ -220,7 +220,7 @@ async fn rejects_unusable_requests() {
     let blank = json!({ "messages": [{ "role": "user", "content": "  " }] });
     let not_chat = json!({ "prompt": "Is it?" });
     for body in [image, no_user, blank, not_chat] {
-        let reply = send(&app.router, chat(Some(DREW_KEY), body)).await;
+        let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
         assert_eq!(reply.json()["error"]["type"], "invalid_request_error");
     }
@@ -239,7 +239,7 @@ async fn rejects_unusable_requests() {
 async fn answered_run_returns_a_completion_with_the_drew_object() {
     let recording = Arc::new(Recording::default());
     let app = app(recording);
-    let reply = send(&app.router, chat(Some(DREW_KEY), ask("Is it?"))).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let body = reply.json();
     let id = run_id(&body);
@@ -277,7 +277,7 @@ async fn answered_run_returns_a_completion_with_the_drew_object() {
 #[tokio::test]
 async fn declined_run_returns_200_with_the_fixed_message_and_ranked_sources() {
     let app = app(canned(Some(CategoryKind::Ranking), fixtures::declined()));
-    let reply = send(&app.router, chat(Some(DREW_KEY), ask("Rank them."))).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Rank them."))).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let body = reply.json();
     let Outcome::Declined { sources, .. } = fixtures::declined() else {
@@ -298,7 +298,7 @@ async fn declined_run_returns_200_with_the_fixed_message_and_ranked_sources() {
 #[tokio::test]
 async fn failed_run_returns_500_with_the_run_id() {
     let app = app(canned(None, fixtures::failed()));
-    let reply = send(&app.router, chat(Some(DREW_KEY), ask("Is it?"))).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
     assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = reply.json();
     let id = run_id(&body);
@@ -324,7 +324,7 @@ async fn every_outcome_is_persisted_for_the_caller() {
         (fixtures::failed(), "failed"),
     ] {
         let app = app(canned(Some(CategoryKind::Boolean), outcome.clone()));
-        let reply = send(&app.router, chat(Some(DREW_KEY), ask("Is it?"))).await;
+        let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
         let id = run_id(&reply.json());
         let stored = app.runs.get(id).await.unwrap().expect("run persisted");
         assert_eq!(stored.user, UserId("drew".into()));
@@ -347,7 +347,7 @@ async fn persistence_failure_returns_500_with_the_run_id() {
             keys: Arc::new(format!("{DREW_KEY}:drew").parse().unwrap()),
             admins: Arc::new(AdminUsers::default()),
         };
-        let reply = send(&router(state), chat(Some(DREW_KEY), ask("Is it?"))).await;
+        let reply = send(&router(state), chat(Some(DREW_KEY), &ask("Is it?"))).await;
         assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
         let body = reply.json();
         assert_eq!(body["error"]["code"], "run_not_persisted");
@@ -369,7 +369,7 @@ async fn streaming_sends_one_content_chunk_a_finish_chunk_and_done() {
     let app = app(recording);
     let mut body = ask("Is it?");
     body["stream"] = json!(true);
-    let reply = send(&app.router, chat(Some(DREW_KEY), body)).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert!(
         reply.headers[header::CONTENT_TYPE]
@@ -409,7 +409,7 @@ async fn streaming_a_declined_run_streams_the_decline() {
     let app = app(canned(None, fixtures::declined()));
     let mut body = ask("Is it?");
     body["stream"] = json!(true);
-    let reply = send(&app.router, chat(Some(DREW_KEY), body)).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK);
     let events = sse_events(&reply.body);
     let content: Value = serde_json::from_str(events[0]).unwrap();
@@ -426,7 +426,7 @@ async fn streaming_a_failed_run_returns_a_json_500() {
     let app = app(canned(None, fixtures::failed()));
     let mut body = ask("Is it?");
     body["stream"] = json!(true);
-    let reply = send(&app.router, chat(Some(DREW_KEY), body)).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(reply.json()["error"]["run_id"].is_string());
 }
@@ -435,7 +435,7 @@ async fn streaming_a_failed_run_returns_a_json_500() {
 async fn a_run_is_visible_only_to_its_owner() {
     let recording = Arc::new(Recording::default());
     let app = app(recording);
-    let reply = send(&app.router, chat(Some(DREW_KEY), ask("Is it?"))).await;
+    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
     let id = run_id(&reply.json());
     let path = format!("/v1/runs/{id}");
 

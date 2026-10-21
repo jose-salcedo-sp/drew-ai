@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{CategoryKind, ChunkId, ChunkRef, Score},
+    domain::{CategoryKind, ChunkId, ChunkRef, Probability},
     llm::ModelRef,
+    retrieval::Relevance,
 };
 
 use super::DeclineReason;
@@ -40,13 +41,13 @@ pub struct TraceEntry {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum StepOutcome {
     Passed {
-        score: Option<Score>,
-        threshold: Option<Score>,
+        score: Option<Probability>,
+        threshold: Option<Probability>,
     },
     Declined {
         reason: DeclineReason,
-        score: Option<Score>,
-        threshold: Option<Score>,
+        score: Option<Probability>,
+        threshold: Option<Probability>,
     },
     Failed {
         error: String,
@@ -68,7 +69,12 @@ pub enum TraceRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RankedChunk {
     pub chunk: ChunkRef,
-    pub score: Score,
+    /// Retrieval's fused score. Rerank records written before `probability` existed hold System One's
+    /// probability here instead.
+    pub score: Relevance,
+    /// System One's probability that the chunk helps answer the question, when `Rerank` judged it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probability: Option<Probability>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
