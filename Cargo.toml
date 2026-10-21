@@ -26,7 +26,8 @@ clone_on_ref_ptr = "deny"
 [dependencies]
 async-trait = "0.1.92"
 aws-config = { version = "1.12.0", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = "1.148.0"
+# Without default features: the default `rustls` feature is the legacy hyper 0.14 / rustls 0.21 client.
+aws-sdk-bedrockruntime = { version = "1.148.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 # Names `Document`, the JSON type of Bedrock tool schemas and tool-use input; the SDK does not re-export it.
 aws-smithy-types = "1.8.1"
 axum = "0.8.9"
