@@ -1,4 +1,4 @@
-//! Types shared by every module: questions, chunks, labels, provenance, and scores.
+//! Types shared by every module: questions, chunks, labels, provenance, and probabilities.
 
 use std::fmt;
 
@@ -73,10 +73,48 @@ pub enum CategoryKind {
     Open,
 }
 
-/// A step's confidence. Compared against that step's threshold; higher is more confident.
+/// A probability or a confidence: finite and in `0..=1`. Step scores and thresholds are compared as these, so a
+/// model's out-of-range or `NaN` output cannot pass a threshold. Serialized as a bare number.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Score(pub f32);
+#[serde(try_from = "f32", into = "f32")]
+pub struct Probability(f32);
+
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[error("expected a probability between 0 and 1, got {0}")]
+pub struct NotAProbability(pub f32);
+
+impl Probability {
+    pub fn new(value: f32) -> Result<Self, NotAProbability> {
+        if (0.0..=1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(NotAProbability(value))
+        }
+    }
+
+    pub fn get(self) -> f32 {
+        self.0
+    }
+
+    /// `1 - p`: the probability of the other answer to a yes/no question.
+    pub fn complement(self) -> Self {
+        Self(1.0 - self.0)
+    }
+}
+
+impl TryFrom<f32> for Probability {
+    type Error = NotAProbability;
+
+    fn try_from(value: f32) -> Result<Self, NotAProbability> {
+        Self::new(value)
+    }
+}
+
+impl From<Probability> for f32 {
+    fn from(probability: Probability) -> f32 {
+        probability.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -310,6 +348,34 @@ impl<T: Clone> AtLeastOne<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probability_rejects_out_of_range_and_non_finite_values() {
+        for bad in [
+            -0.3,
+            1.7,
+            -f32::EPSILON,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert!(Probability::new(bad).is_err(), "{bad}");
+        }
+        for good in [0.0, 0.5, 1.0] {
+            assert_eq!(Probability::new(good).unwrap().get(), good);
+        }
+        assert_eq!(Probability::new(0.25).unwrap().complement().get(), 0.75);
+    }
+
+    #[test]
+    fn probability_is_a_bare_number_and_deserialization_checks_it() {
+        let p = Probability::new(0.875).unwrap();
+        assert_eq!(serde_json::to_string(&p).unwrap(), "0.875");
+        assert_eq!(serde_json::from_str::<Probability>("0.875").unwrap(), p);
+        for bad in ["1.5", "-0.1", "1e39"] {
+            assert!(serde_json::from_str::<Probability>(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn at_least_two_rejects_one() {

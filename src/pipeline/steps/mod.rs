@@ -43,6 +43,7 @@ fn ranked(hits: &[Retrieved]) -> Vec<RankedChunk> {
         .map(|hit| RankedChunk {
             chunk: hit.chunk.reference(),
             score: hit.score,
+            probability: None,
         })
         .collect()
 }

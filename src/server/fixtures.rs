@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::{
-    domain::{AtLeastOne, ChunkId, ChunkRef, ChunkVersion, Cited, Provenance, Score, Span},
+    domain::{AtLeastOne, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance, Span},
     pipeline::{
         DeclineReason,
         report::{Answer, Citation, Outcome, Verdict},
@@ -47,7 +47,7 @@ pub fn answered() -> Outcome {
     Outcome::Answered(Answer {
         verdict: Some(Verdict::Boolean {
             yes: true,
-            confidence: Score(0.9),
+            confidence: Probability::new(0.9).unwrap(),
         }),
         why: vec![cited("AGR_USERS assigns roles to users.", &[1])],
         citations: vec![citation(1)],
@@ -58,8 +58,8 @@ pub fn declined() -> Outcome {
     Outcome::Declined {
         at: "rerank".into(),
         reason: DeclineReason::LowConfidence,
-        score: Some(Score(0.25)),
-        threshold: Some(Score(0.5)),
+        score: Some(Probability::new(0.25).unwrap()),
+        threshold: Some(Probability::new(0.5).unwrap()),
         sources: vec![citation(2), citation(1)],
     }
 }

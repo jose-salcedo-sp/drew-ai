@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    domain::{CategoryKind, Question, Score},
-    llm::system_one::{Decision, DecisionAnswer, DecisionRequest, Options, SystemOne},
+    domain::{CategoryKind, Probability, Question},
+    llm::system_one::{Decision, DecisionRequest, DecisionResponse, Options, SystemOne},
     pipeline::{
         Asked, DeclineReason, Scored, Step, StepError, Unclassified, trace::ClassifyRecord,
     },
@@ -37,7 +37,7 @@ const OPTIONS: [(CategoryKind, &str, &str); 4] = [
 /// cannot be wrong the way a forced yes or no can. The step's score stays System One's probability.
 pub struct Classify {
     system_one: Option<Arc<dyn SystemOne>>,
-    min_confidence: Option<Score>,
+    min_confidence: Option<Probability>,
 }
 
 impl Classify {
@@ -48,7 +48,7 @@ impl Classify {
         }
     }
 
-    pub fn with_min_confidence(self, min_confidence: Option<Score>) -> Self {
+    pub fn with_min_confidence(self, min_confidence: Option<Probability>) -> Self {
         Self {
             min_confidence,
             ..self
@@ -75,28 +75,17 @@ impl Classify {
 }
 
 /// The chosen category and the calibrated probability System One gave it.
-fn parse(answer: Option<&DecisionAnswer>) -> Result<(CategoryKind, Score), DeclineReason> {
+fn parse(response: &DecisionResponse) -> Result<(CategoryKind, Probability), DeclineReason> {
     let invalid = |detail: String| DeclineReason::InvalidModelOutput(detail);
-    let Some(DecisionAnswer::Choice {
-        choice,
-        probabilities,
-        ..
-    }) = answer
-    else {
-        return Err(invalid(format!(
-            "expected a choice answer for {QUESTION_ID:?}"
-        )));
-    };
+    let (choice, probability) = response
+        .choice(QUESTION_ID)
+        .map_err(|error| invalid(error.to_string()))?;
     let category = OPTIONS
         .iter()
-        .find(|(_, name, _)| name == choice)
+        .find(|(_, name, _)| *name == choice)
         .map(|(category, _, _)| *category)
         .ok_or_else(|| invalid(format!("unknown category {choice:?}")))?;
-    let probability = probabilities
-        .get(choice)
-        .copied()
-        .ok_or_else(|| invalid(format!("no probability for {choice:?}")))?;
-    Ok((category, Score(probability)))
+    Ok((category, probability))
 }
 
 impl Step for Classify {
@@ -130,7 +119,7 @@ impl Step for Classify {
             })?;
         let answer = response.answers.get(QUESTION_ID);
         let raw = answer.and_then(|answer| serde_json::to_string(answer).ok());
-        let (chosen, score) = parse(answer).map_err(|reason| {
+        let (chosen, score) = parse(&response).map_err(|reason| {
             StepError::decline(reason)
                 .with_record(ClassifyRecord {
                     raw: raw.clone(),
@@ -158,9 +147,13 @@ impl Step for Classify {
 
 #[cfg(test)]
 mod tests {
-    use crate::llm::system_one::{DecisionResponse, ScriptedSystemOne};
+    use crate::llm::system_one::{DecisionAnswer, ScriptedSystemOne};
 
     use super::*;
+
+    fn p(value: f32) -> Probability {
+        Probability::new(value).unwrap()
+    }
 
     fn choice(choice: &str, probability: f32) -> DecisionResponse {
         DecisionResponse {
@@ -193,7 +186,7 @@ mod tests {
         let scored = classify(&system_one).await.unwrap();
 
         assert_eq!(scored.output, CategoryKind::Boolean);
-        assert_eq!(scored.score, Some(Score(0.87)));
+        assert_eq!(scored.score, Some(p(0.87)));
         assert_eq!(scored.prompt_version, Some(CLASSIFY_PROMPT_VERSION));
         let request = &system_one.requests()[0];
         assert_eq!(request.state, "Does AGR_USERS hold role assignments?");
@@ -206,11 +199,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_unsure_decisive_category_falls_back_to_open() {
-        let unsure = |category: &str, p: f32| {
-            let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice(category, p))]));
+        let unsure = |category: &str, probability: f32| {
+            let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice(category, probability))]));
             async move {
                 Classify::new(Some(system_one))
-                    .with_min_confidence(Some(Score(0.6)))
+                    .with_min_confidence(Some(p(0.6)))
                     .run(&Question::new("q"), Asked)
                     .await
                     .unwrap()
@@ -219,7 +212,7 @@ mod tests {
 
         let scored = unsure("boolean", 0.55).await;
         assert_eq!(scored.output, CategoryKind::Open);
-        assert_eq!(scored.score, Some(Score(0.55)));
+        assert_eq!(scored.score, Some(p(0.55)));
         assert_eq!(scored.record.fallback_from, Some(CategoryKind::Boolean));
 
         let scored = unsure("boolean", 0.65).await;
@@ -243,6 +236,24 @@ mod tests {
         ));
         assert!(error.record.is_some());
         assert_eq!(error.prompt_version, Some(CLASSIFY_PROMPT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn a_probability_outside_zero_to_one_declines_with_the_raw_answer() {
+        for bad in [1.3, -0.2, f32::NAN] {
+            let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice("boolean", bad))]));
+
+            let error = classify(&system_one).await.err().unwrap();
+
+            assert!(
+                matches!(
+                    error.kind,
+                    crate::pipeline::StepErrorKind::Decline(DeclineReason::InvalidModelOutput(_))
+                ),
+                "{bad}"
+            );
+            assert!(error.record.is_some(), "{bad}");
+        }
     }
 
     #[tokio::test]

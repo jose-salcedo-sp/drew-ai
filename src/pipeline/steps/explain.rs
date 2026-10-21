@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    domain::{ChunkId, Question, Score},
+    domain::{ChunkId, Probability, Question},
     llm::{ChatModel, ChatRequest},
     pipeline::{Boolean, DeclineReason, Open, Scored, Step, StepError, trace::ExplainRecord},
     retrieval::Retrieved,
@@ -138,7 +138,7 @@ pub struct Explained {
 pub struct ExplainedVerdict {
     pub explained: Explained,
     pub yes: bool,
-    pub confidence: Score,
+    pub confidence: Probability,
 }
 
 /// At least one claim. Claims may still lack citations or cite unknown chunks; `Verify` rejects those.

@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 
-use crate::domain::{Chunk, Score};
+use crate::domain::Chunk;
 
-use super::{Retrieved, Retriever};
+use super::{Relevance, Retrieved, Retriever};
 
 /// Ranks chunks by the fraction of query words they contain. Chunks with no shared word are dropped.
 pub struct KeywordRetriever {
@@ -25,7 +25,7 @@ impl Retriever for KeywordRetriever {
                 let shared = query.intersection(&words(&chunk.text)).count();
                 (shared > 0).then(|| Retrieved {
                     chunk: chunk.clone(),
-                    score: Score(shared as f32 / query.len() as f32),
+                    score: Relevance(shared as f32 / query.len() as f32),
                     context_for: None,
                 })
             })

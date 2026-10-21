@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{CategoryKind, Question, RunId, Score},
+    domain::{CategoryKind, Probability, Question, RunId},
     llm::ModelRef,
 };
 
@@ -76,7 +76,7 @@ pub trait Step: Send + Sync {
     type Record: Into<TraceRecord> + Send;
 
     /// Minimum score to continue. A step with a threshold must return a score.
-    fn threshold(&self) -> Option<Score> {
+    fn threshold(&self) -> Option<Probability> {
         None
     }
 
@@ -90,7 +90,7 @@ pub trait Step: Send + Sync {
 pub struct Scored<TOutput, TRecord> {
     pub output: TOutput,
     pub record: TRecord,
-    pub score: Option<Score>,
+    pub score: Option<Probability>,
     pub model: Option<ModelRef>,
     pub prompt_version: Option<&'static str>,
 }
@@ -106,7 +106,7 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
         }
     }
 
-    pub fn with_score(self, score: Score) -> Self {
+    pub fn with_score(self, score: Probability) -> Self {
         Self {
             score: Some(score),
             ..self
@@ -202,8 +202,8 @@ pub struct Halted {
 pub enum Halt {
     Declined {
         reason: DeclineReason,
-        score: Option<Score>,
-        threshold: Option<Score>,
+        score: Option<Probability>,
+        threshold: Option<Probability>,
     },
     Failed {
         error: String,

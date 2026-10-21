@@ -8,7 +8,7 @@ use sqlx::PgPool;
 
 use crate::{
     config::{ConfigArgs, PipelineConfig},
-    domain::{CategoryKind, Chunk, Provenance, Question, RunId, Score},
+    domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
         self, ChatModel, ModelRef,
         bedrock_chat::ChatArgs,
@@ -95,7 +95,7 @@ impl PipelineAnswerer {
         let threshold = |category, step| config.threshold(category, step);
         Self {
             classify: Classify::new(system_one.clone())
-                .with_min_confidence(config.classify.min_confidence.map(Score)),
+                .with_min_confidence(config.classify.min_confidence),
             retrieve,
             rerank_open: Rerank::from_config(
                 &config.rerank,

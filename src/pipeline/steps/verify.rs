@@ -1,7 +1,7 @@
 use std::{collections::HashSet, marker::PhantomData};
 
 use crate::{
-    domain::{AtLeastOne, ChunkId, Cited, Provenance, Question, Score},
+    domain::{AtLeastOne, ChunkId, Cited, Probability, Provenance, Question},
     pipeline::{Boolean, DeclineReason, Open, Scored, Step, StepError, trace::VerifyRecord},
 };
 
@@ -38,7 +38,7 @@ pub struct VerifiedAnswer {
 pub struct VerifiedVerdict {
     pub verified: Verified,
     pub yes: bool,
-    pub confidence: Score,
+    pub confidence: Probability,
 }
 
 impl VerifiedAnswer {

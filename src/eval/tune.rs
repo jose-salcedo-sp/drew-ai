@@ -8,7 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::CategoryKind,
+    domain::{CategoryKind, Probability},
     pipeline::{DeclineReason, report::Outcome, trace::StepOutcome},
 };
 
@@ -23,14 +23,14 @@ pub struct Candidate {
     pub name: String,
     /// Step name (as recorded in the trace) to minimum score. A step not listed has no threshold.
     #[serde(default)]
-    pub thresholds: BTreeMap<String, f32>,
+    pub thresholds: BTreeMap<String, Probability>,
     /// Overrides `thresholds` for runs the pipeline classified into that category.
     #[serde(default)]
-    pub per_category: HashMap<CategoryKind, BTreeMap<String, f32>>,
+    pub per_category: HashMap<CategoryKind, BTreeMap<String, Probability>>,
 }
 
 impl Candidate {
-    fn threshold(&self, category: Option<CategoryKind>, step: &str) -> Option<f32> {
+    fn threshold(&self, category: Option<CategoryKind>, step: &str) -> Option<Probability> {
         category
             .and_then(|category| self.per_category.get(&category))
             .and_then(|thresholds| thresholds.get(step))
@@ -94,7 +94,7 @@ fn replay(run: &EvalRun, candidate: &Candidate) -> Replayed {
             _ => continue,
         };
         if let Some(threshold) = candidate.threshold(report.category, &entry.step)
-            && score.0 < threshold
+            && *score < threshold
         {
             return Replayed::Declined { unresolved: false };
         }

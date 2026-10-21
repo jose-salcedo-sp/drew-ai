@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    domain::{CategoryKind, Question, Score},
+    domain::{CategoryKind, Probability, Question},
     pipeline::report::{Answer, CannedAnswerer, Outcome, Verdict},
     server::{AppState, auth::AdminUsers},
     slack::{Bot, SlackArgs, fakes::FakeSlack, strip_mentions},
@@ -12,7 +12,7 @@ fn answered() -> Outcome {
     Outcome::Answered(Answer {
         verdict: Some(Verdict::Boolean {
             yes: true,
-            confidence: Score(0.9),
+            confidence: Probability::new(0.9).unwrap(),
         }),
         why: vec![],
         citations: vec![],

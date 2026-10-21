@@ -13,7 +13,7 @@ pub fn answer(answer: &Answer, run_id: &str) -> String {
     match &answer.verdict {
         Some(Verdict::Boolean { yes, confidence }) => {
             let verdict = if *yes { "Yes" } else { "No" };
-            blocks.push(format!("*{verdict}* (confidence {:.2})", confidence.0));
+            blocks.push(format!("*{verdict}* (confidence {:.2})", confidence.get()));
         }
         Some(Verdict::Choice { selected, rejected }) => {
             blocks.push(format!(
@@ -153,7 +153,7 @@ fn text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Score;
+    use crate::domain::Probability;
 
     #[test]
     fn ingested_text_cannot_inject_mrkdwn() {
@@ -168,7 +168,7 @@ mod tests {
         let answer = Answer {
             verdict: Some(Verdict::Boolean {
                 yes: true,
-                confidence: Score(0.9),
+                confidence: Probability::new(0.9).unwrap(),
             }),
             why: vec![],
             citations: vec![],

@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use eros::ensure;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
+use crate::domain::{NotAProbability, Probability};
+
 use super::ModelRef;
 
 #[derive(Clone, Debug, clap::Args)]
@@ -64,6 +66,8 @@ impl Serialize for Options {
     }
 }
 
+/// The wire format, unchecked. Steps read probabilities through `yes_no` and `choice`, which reject any outside
+/// `0..=1`, so one bad answer declines its step instead of failing the whole response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DecisionResponse {
     pub answers: BTreeMap<String, DecisionAnswer>,
@@ -85,6 +89,63 @@ pub enum DecisionAnswer {
         confidence: f32,
         probabilities: BTreeMap<String, f32>,
     },
+}
+
+/// An answer that is not the kind asked for, or whose probability is not one.
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum InvalidAnswer {
+    #[error("expected a {expected} answer for {id:?}")]
+    Unexpected { id: String, expected: &'static str },
+    #[error("no probability for {choice:?} in the answer for {id:?}")]
+    NoProbability { id: String, choice: String },
+    #[error("answer for {id:?}: {source}")]
+    OutOfRange {
+        id: String,
+        #[source]
+        source: NotAProbability,
+    },
+}
+
+impl DecisionResponse {
+    /// The probability of yes for the yes/no question `id`.
+    pub fn yes_no(&self, id: &str) -> Result<Probability, InvalidAnswer> {
+        match self.answers.get(id) {
+            Some(DecisionAnswer::Noul { noul }) => probability(id, *noul),
+            _ => Err(InvalidAnswer::Unexpected {
+                id: id.to_owned(),
+                expected: "yes/no",
+            }),
+        }
+    }
+
+    /// The option chosen for the choice question `id`, and the probability given to it.
+    pub fn choice(&self, id: &str) -> Result<(&str, Probability), InvalidAnswer> {
+        let Some(DecisionAnswer::Choice {
+            choice,
+            probabilities,
+            ..
+        }) = self.answers.get(id)
+        else {
+            return Err(InvalidAnswer::Unexpected {
+                id: id.to_owned(),
+                expected: "choice",
+            });
+        };
+        let p = probabilities
+            .get(choice)
+            .ok_or_else(|| InvalidAnswer::NoProbability {
+                id: id.to_owned(),
+                choice: choice.clone(),
+            })?;
+        Ok((choice, probability(id, *p)?))
+    }
+}
+
+fn probability(id: &str, value: f32) -> Result<Probability, InvalidAnswer> {
+    Probability::new(value).map_err(|source| InvalidAnswer::OutOfRange {
+        id: id.to_owned(),
+        source,
+    })
 }
 
 #[async_trait]
@@ -255,6 +316,85 @@ mod tests {
         assert!(matches!(
             &response.answers["category"],
             DecisionAnswer::Choice { choice, .. } if choice == "boolean"
+        ));
+    }
+
+    fn response(answer: DecisionAnswer) -> DecisionResponse {
+        DecisionResponse {
+            answers: BTreeMap::from([("q".into(), answer)]),
+        }
+    }
+
+    #[test]
+    fn yes_no_rejects_probabilities_outside_zero_to_one_and_nan() {
+        for bad in [1.7, -0.3, f32::NAN] {
+            assert!(matches!(
+                response(DecisionAnswer::Noul { noul: bad }).yes_no("q"),
+                Err(InvalidAnswer::OutOfRange { .. })
+            ));
+        }
+        let ok = response(DecisionAnswer::Noul { noul: 0.25 });
+        assert_eq!(ok.yes_no("q").unwrap().get(), 0.25);
+        assert!(matches!(
+            ok.yes_no("other"),
+            Err(InvalidAnswer::Unexpected { .. })
+        ));
+        assert!(matches!(
+            ok.choice("q"),
+            Err(InvalidAnswer::Unexpected { .. })
+        ));
+    }
+
+    #[test]
+    fn choice_checks_the_chosen_probability() {
+        let choice = |p: f32| {
+            response(DecisionAnswer::Choice {
+                choice: "open".into(),
+                confidence: 0.5,
+                probabilities: BTreeMap::from([("open".into(), p)]),
+            })
+        };
+        assert_eq!(choice(0.8).choice("q").unwrap().0, "open");
+        assert!(matches!(
+            choice(1.3).choice("q"),
+            Err(InvalidAnswer::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            choice(f32::NAN).choice("q"),
+            Err(InvalidAnswer::OutOfRange { .. })
+        ));
+        let missing = response(DecisionAnswer::Choice {
+            choice: "boolean".into(),
+            confidence: 0.5,
+            probabilities: BTreeMap::new(),
+        });
+        assert!(matches!(
+            missing.choice("q"),
+            Err(InvalidAnswer::NoProbability { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_answer_still_arrives_so_its_step_can_decline() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "answers": { "q": { "type": "noul", "noul": 1.7 } }
+            })))
+            .mount(&server)
+            .await;
+        let client = HttpSystemOne::from_args(&SystemOneArgs {
+            system_one_url: Some(server.uri()),
+            system_one_model: "kev-latest".into(),
+            system_one_key: None,
+        })
+        .unwrap();
+
+        let response = client.decide(request()).await.unwrap();
+
+        assert!(matches!(
+            response.yes_no("q"),
+            Err(InvalidAnswer::OutOfRange { .. })
         ));
     }
 

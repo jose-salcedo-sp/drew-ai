@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{CategoryKind, Score},
+    domain::{CategoryKind, Probability},
     retrieval::hybrid::HybridConfig,
 };
 
@@ -53,7 +53,7 @@ pub struct PipelineConfig {
     pub classify: ClassifyConfig,
     pub rerank: RerankConfig,
     /// Minimum score per step, keyed by the step's trace name; the shape of a `drew eval tune` candidate.
-    pub thresholds: BTreeMap<String, f32>,
+    pub thresholds: BTreeMap<String, Probability>,
     /// Overrides `thresholds` for runs classified into that category.
     pub per_category: PerCategory,
 }
@@ -62,7 +62,7 @@ pub struct PipelineConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ClassifyConfig {
     /// Below this probability, a `boolean`, `choice` or `ranking` classification falls back to `open`.
-    pub min_confidence: Option<f32>,
+    pub min_confidence: Option<Probability>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -90,17 +90,17 @@ impl Default for RerankConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct PerCategory {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub boolean: BTreeMap<String, f32>,
+    pub boolean: BTreeMap<String, Probability>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub choice: BTreeMap<String, f32>,
+    pub choice: BTreeMap<String, Probability>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub ranking: BTreeMap<String, f32>,
+    pub ranking: BTreeMap<String, Probability>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub open: BTreeMap<String, f32>,
+    pub open: BTreeMap<String, Probability>,
 }
 
 impl PerCategory {
-    fn get(&self, category: CategoryKind) -> &BTreeMap<String, f32> {
+    fn get(&self, category: CategoryKind) -> &BTreeMap<String, Probability> {
         match category {
             CategoryKind::Boolean => &self.boolean,
             CategoryKind::Choice => &self.choice,
@@ -109,7 +109,7 @@ impl PerCategory {
         }
     }
 
-    fn all(&self) -> impl Iterator<Item = &BTreeMap<String, f32>> {
+    fn all(&self) -> impl Iterator<Item = &BTreeMap<String, Probability>> {
         [&self.boolean, &self.choice, &self.ranking, &self.open].into_iter()
     }
 }
@@ -126,40 +126,29 @@ impl PipelineConfig {
     }
 
     fn validate(&self) -> eros::Result<()> {
-        let probability = |name: &str, value: f32| -> eros::Result<()> {
-            eros::ensure!(
-                (0.0..=1.0).contains(&value),
-                "{name} must be between 0 and 1, got {value}"
-            );
-            Ok(())
-        };
-        if let Some(min) = self.classify.min_confidence {
-            probability("classify.min_confidence", min)?;
-        }
         eros::ensure!(
             self.rerank.top_k > 0 && self.rerank.candidates >= self.rerank.top_k,
             "rerank needs 0 < top_k <= candidates"
         );
         for thresholds in std::iter::once(&self.thresholds).chain(self.per_category.all()) {
-            for (step, &value) in thresholds {
+            for step in thresholds.keys() {
                 eros::ensure!(
                     THRESHOLDED_STEPS.contains(&step.as_str()),
                     "no threshold applies to step `{step}`; thresholded steps are {THRESHOLDED_STEPS:?} \
                      (classify uses classify.min_confidence)"
                 );
-                probability(step, value)?;
             }
         }
         Ok(())
     }
 
     /// The category's override, else the general threshold.
-    pub fn threshold(&self, category: CategoryKind, step: &str) -> Option<Score> {
+    pub fn threshold(&self, category: CategoryKind, step: &str) -> Option<Probability> {
         self.per_category
             .get(category)
             .get(step)
             .or_else(|| self.thresholds.get(step))
-            .map(|&value| Score(value))
+            .copied()
     }
 }
 
@@ -209,11 +198,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.threshold(CategoryKind::Boolean, "answer"),
-            Some(Score(0.8))
+            Some(Probability::new(0.8).unwrap())
         );
         assert_eq!(
             config.threshold(CategoryKind::Open, "answer"),
-            Some(Score(0.6))
+            Some(Probability::new(0.6).unwrap())
         );
         assert_eq!(config.threshold(CategoryKind::Open, "rerank"), None);
     }
@@ -225,10 +214,28 @@ mod tests {
             r#"{"rerank": {"top": 5}}"#,
             r#"{"thresholds": {"classify": 0.5}}"#,
             r#"{"per_category": {"boolean": {"explain": 0.5}}}"#,
-            r#"{"thresholds": {"answer": 1.5}}"#,
             r#"{"rerank": {"top_k": 10, "candidates": 5}}"#,
         ] {
             assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn probabilities_outside_zero_to_one_are_rejected_on_every_load_path() {
+        for bad in [
+            r#"{"thresholds": {"answer": 1.5}}"#,
+            r#"{"thresholds": {"rerank": -0.1}}"#,
+            r#"{"thresholds": {"answer": 1e39}}"#,
+            r#"{"per_category": {"boolean": {"answer": 1.01}}}"#,
+            r#"{"classify": {"min_confidence": 1.2}}"#,
+            r#"{"classify": {"min_confidence": -0.5}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(PipelineConfig::parse(r#"{"thresholds": {"answer": 1.0}}"#).is_ok());
     }
 }
