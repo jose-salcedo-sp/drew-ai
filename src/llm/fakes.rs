@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ChatModel, ChatRequest, ChatResponse, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
+    system_one::{DecisionRequest, DecisionResponse, SystemOne},
 };
 
 /// Hashes each lowercase word into a bucket, so texts sharing words have a high cosine similarity.
@@ -89,5 +90,50 @@ impl ChatModel for ScriptedChat {
             .expect("lock poisoned: a test thread panicked while holding it")
             .pop_front()
             .unwrap_or_else(|| Err(eros::error!("ScriptedChat has no responses left")))
+    }
+}
+
+/// Returns queued responses in order and records every request it received, under its own model name as
+/// `HttpSystemOne` sends it.
+pub struct ScriptedSystemOne {
+    responses: Mutex<VecDeque<eros::Result<DecisionResponse>>>,
+    requests: Mutex<Vec<DecisionRequest>>,
+}
+
+impl ScriptedSystemOne {
+    pub fn new(responses: impl IntoIterator<Item = eros::Result<DecisionResponse>>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn requests(&self) -> Vec<DecisionRequest> {
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl SystemOne for ScriptedSystemOne {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("fake-system-one", "1")
+    }
+
+    async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .push(DecisionRequest {
+                model: self.model().id,
+                ..request
+            });
+        self.responses
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .pop_front()
+            .unwrap_or_else(|| Err(eros::error!("ScriptedSystemOne has no responses left")))
     }
 }

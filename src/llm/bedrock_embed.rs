@@ -158,8 +158,17 @@ pub struct BedrockEmbedder {
 }
 
 impl BedrockEmbedder {
+    pub fn new(client: Client, model_id: impl Into<String>) -> eros::Result<Self> {
+        let model_id = model_id.into();
+        Ok(Self {
+            family: Family::of(&model_id)?,
+            client,
+            model_id,
+        })
+    }
+
+    /// Region and credentials come from the standard AWS environment and profile chain.
     pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
-        let family = Family::of(&args.embed_model)?;
         let timeouts = TimeoutConfig::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .operation_timeout(OPERATION_TIMEOUT)
@@ -168,11 +177,7 @@ impl BedrockEmbedder {
             .timeout_config(timeouts)
             .load()
             .await;
-        Ok(Self {
-            client: Client::new(&config),
-            model_id: args.embed_model.clone(),
-            family,
-        })
+        Self::new(Client::new(&config), &args.embed_model)
     }
 
     async fn invoke(&self, request: Request) -> eros::Result<Vec<Vec<f32>>> {

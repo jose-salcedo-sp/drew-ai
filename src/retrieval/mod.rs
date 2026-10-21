@@ -1,5 +1,6 @@
 //! Hybrid retrieval: full-text + vector over current chunk versions, merged with reciprocal rank fusion.
 
+#[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod hybrid;
 
@@ -24,6 +25,9 @@ pub struct Relevance(pub f32);
 
 #[async_trait]
 pub trait Retriever: Send + Sync {
-    /// Top hybrid matches, expanded to their parent unit and deduplicated, best first.
+    /// Top hybrid matches, expanded to their parent unit and deduplicated, best first, ties by chunk id.
+    ///
+    /// There is no relevance floor: a non-blank query over a non-empty corpus returns its nearest chunks even when
+    /// none is about the question, and Rerank judges relevance. Only a blank query or an empty corpus returns nothing.
     async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>>;
 }
