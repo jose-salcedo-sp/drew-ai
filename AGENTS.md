@@ -4,13 +4,14 @@
 
 ## Done
 
-Work is done when all five pass with the database running (`docker compose up -d --wait db`):
+Work is done when all six pass with the database running (`docker compose up -d --wait db`):
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo nextest run
 cargo test --doc
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo audit
 ```
 
