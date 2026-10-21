@@ -2,7 +2,7 @@
 //!
 //! The wire format is TypeSafe's `POST /v1/systemone`, served locally by Kev (github.com/jaredpalmer/kev).
 
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;
 use eros::ensure;
@@ -147,48 +147,7 @@ impl HttpSystemOne {
     }
 }
 
-/// Returns queued responses in order and records every request it received.
-pub struct ScriptedSystemOne {
-    responses: Mutex<Vec<eros::Result<DecisionResponse>>>,
-    requests: Mutex<Vec<DecisionRequest>>,
-}
-
-impl ScriptedSystemOne {
-    pub fn new(responses: impl IntoIterator<Item = eros::Result<DecisionResponse>>) -> Self {
-        let mut responses: Vec<_> = responses.into_iter().collect();
-        responses.reverse();
-        Self {
-            responses: Mutex::new(responses),
-            requests: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn requests(&self) -> Vec<DecisionRequest> {
-        self.requests
-            .lock()
-            .expect("lock poisoned: a test thread panicked while holding it")
-            .clone()
-    }
-}
-
-#[async_trait]
-impl SystemOne for ScriptedSystemOne {
-    fn model(&self) -> ModelRef {
-        ModelRef::new("fake-system-one", "1")
-    }
-
-    async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
-        self.requests
-            .lock()
-            .expect("lock poisoned: a test thread panicked while holding it")
-            .push(request);
-        self.responses
-            .lock()
-            .expect("lock poisoned: a test thread panicked while holding it")
-            .pop()
-            .unwrap_or_else(|| Err(eros::error!("ScriptedSystemOne has no responses left")))
-    }
-}
+pub use super::fakes::ScriptedSystemOne;
 
 #[cfg(test)]
 mod tests {

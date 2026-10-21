@@ -1,7 +1,7 @@
 //! Retrieval does not judge relevance: a non-blank query over a non-empty corpus returns its nearest chunks, and
 //! Rerank decides which of them answer the question.
 
-use std::{collections::HashSet, future::Future};
+use std::collections::HashSet;
 
 use drew::{
     domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
@@ -53,22 +53,18 @@ fn ids(chunks: &[Chunk]) -> HashSet<ChunkId> {
     chunks.iter().map(|chunk| chunk.id.clone()).collect()
 }
 
-pub async fn an_empty_corpus_returns_nothing<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn an_empty_corpus_returns_nothing(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let retriever = make(Vec::new()).await;
 
     assert!(retriever.retrieve(QUESTION).await?.is_empty());
     Ok(())
 }
 
-pub async fn a_blank_query_returns_nothing<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn a_blank_query_returns_nothing(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
     assert!(retriever.retrieve("").await?.is_empty());
@@ -76,11 +72,9 @@ where
     Ok(())
 }
 
-pub async fn an_unrelated_query_still_returns_the_nearest_chunks<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn an_unrelated_query_still_returns_the_nearest_chunks(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
     for query in ["Cafeteria opening hours?", "???"] {
@@ -95,11 +89,9 @@ where
     Ok(())
 }
 
-pub async fn the_best_match_ranks_first<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn the_best_match_ranks_first(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
     let hits = retriever.retrieve(QUESTION).await?;
@@ -108,11 +100,9 @@ where
     Ok(())
 }
 
-pub async fn hits_are_best_first_without_duplicates<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn hits_are_best_first_without_duplicates(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
     let hits = retriever.retrieve(QUESTION).await?;
@@ -127,11 +117,9 @@ where
     Ok(())
 }
 
-pub async fn equal_matches_rank_by_chunk_id<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn equal_matches_rank_by_chunk_id(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let text = "PFCG maintains roles.";
     let (later, earlier) = (chunk("pfcg-b", text), chunk("pfcg-a", text));
     let retriever = make(vec![later.clone(), earlier.clone()]).await;
@@ -143,11 +131,9 @@ where
     Ok(())
 }
 
-pub async fn chunks_come_back_as_stored<F, R>(make: F) -> eros::Result<()>
-where
-    F: FnOnce(Vec<Chunk>) -> R,
-    R: Future<Output = Box<dyn Retriever>>,
-{
+pub async fn chunks_come_back_as_stored(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
     let hits = retriever.retrieve(QUESTION).await?;
