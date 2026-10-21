@@ -277,6 +277,9 @@ impl EventTasks {
         let unanswered = Arc::clone(&self.unanswered);
         self.tasks.spawn(async move {
             let _admitted = admitted;
+            // A post that fails, or that is still in flight at the drain's abort, leaves no ts to
+            // edit, so its user gets no restart notice. The client's 30 s request timeout exceeds
+            // `DRAIN_TIMEOUT`, so a slow post can be cut off.
             let placeholder = ask.post_placeholder(api.as_ref()).await?;
             lock(&unanswered).insert(task::id(), placeholder.clone());
             let _running = running
