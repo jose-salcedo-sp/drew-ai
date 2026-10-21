@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  MBX_VERSION: 1.25.0
+
+jobs:
+  done-checks:
+    name: Done checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      # Same image and settings as the `db` service in compose.yaml.
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: drew
+          POSTGRES_PASSWORD: drew
+          POSTGRES_DB: drew
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U drew"
+          --health-interval 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://drew:drew@localhost:5433/drew
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs the channel and components named in rust-toolchain.toml.
+      - name: Install toolchain
+        run: rustup toolchain install && rustc --version
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest@0.9.148,cargo-binstall@1.26.0
+
+      # install-action has no mbx manifest; binstall takes the release binary and never builds from source.
+      - name: Install mbx
+        run: cargo binstall --no-confirm --disable-strategies quick-install,compile "mbx@${MBX_VERSION}"
+
+      # The GitHub cache holds 10 GB per repository, shared by every branch.
+      - name: Configure mbx
+        run: |
+          mbx settings set gc.max_total_size 3GiB
+          mbx setup --yes
+          shim="$(mbx setup --status | sed -n 's/^mbx setup is installed and current: //p')"
+          test -x "$shim"
+          dirname "$shim" >> "$GITHUB_PATH"
+
+      - name: Restore mbx cache
+        id: mbx-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/mbx
+            !~/.cache/mbx/targets
+          key: mbx-${{ env.MBX_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            mbx-${{ env.MBX_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: mbx doctor
+        run: |
+          command -v cargo
+          mbx doctor
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo nextest run
+        run: cargo nextest run --profile ci
+
+      - name: cargo test --doc
+        run: cargo test --doc
+
+      - name: Upload JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+      - name: mbx gc
+        if: ${{ !cancelled() && steps.mbx-cache.outputs.cache-hit != 'true' }}
+        run: mbx gc && mbx cache stats
+
+      - name: Save mbx cache
+        if: ${{ !cancelled() && steps.mbx-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/mbx
+            !~/.cache/mbx/targets
+          key: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+
+      - name: mbx stats
+        if: ${{ !cancelled() }}
+        run: mbx stats
