@@ -153,6 +153,7 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
     ) -> Result<Scored<Reranked, RerankRecord>, StepError> {
         let (mut matches, context): (Vec<Retrieved>, Vec<Retrieved>) = input
             .0
+            .into_vec()
             .into_iter()
             .partition(|hit| hit.context_for.is_none());
         matches.sort_by(|a, b| b.score.0.total_cmp(&a.score.0));
@@ -319,7 +320,7 @@ mod tests {
     }
 
     fn candidates(hits: Vec<Retrieved>) -> Candidates {
-        Candidates(hits)
+        Candidates(crate::domain::AtLeastOne::try_from(hits).unwrap())
     }
 
     #[tokio::test]

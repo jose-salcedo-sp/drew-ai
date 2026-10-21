@@ -130,15 +130,15 @@ impl<TCategory> Explain<TCategory> {
 
 /// Output of `Explain`: the claims, not yet checked against the sources they cite.
 pub struct Explained {
-    pub explanation: Explanation,
-    pub sources: Reranked,
+    pub(super) explanation: Explanation,
+    pub(super) sources: Reranked,
 }
 
 /// Output of `Explain<Boolean>`: the explanation and the verdict it explains.
 pub struct ExplainedVerdict {
-    pub explained: Explained,
-    pub yes: bool,
-    pub confidence: Probability,
+    pub(super) explained: Explained,
+    pub(super) yes: bool,
+    pub(super) confidence: Probability,
 }
 
 /// At least one claim. Claims may still lack citations or cite unknown chunks; `Verify` rejects those.

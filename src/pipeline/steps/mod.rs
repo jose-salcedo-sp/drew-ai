@@ -19,7 +19,7 @@ pub use self::{
     verify::{Verified, VerifiedAnswer, VerifiedVerdict, Verify},
 };
 
-use crate::retrieval::Retrieved;
+use crate::{domain::AtLeastOne, retrieval::Retrieved};
 
 use super::{Open, Seq, trace::RankedChunk};
 
@@ -30,13 +30,19 @@ pub type OpenEnded = Seq<Explain<Open>, Verify<Open>>;
 /// System One decides, the LLM explains, Verify checks the citations. Only `Decisive<Boolean>` is a `Pipeline` so far.
 pub type Decisive<TCategory> = Seq<Answer<TCategory>, Seq<Explain<TCategory>, Verify<TCategory>>>;
 
-/// Output of `Retrieve`: hybrid matches, best first. Never empty.
+/// Output of `Retrieve`: hybrid matches, best first.
 #[derive(Clone, Debug)]
-pub struct Candidates(pub Vec<Retrieved>);
+pub struct Candidates(AtLeastOne<Retrieved>);
 
 /// Output of `Rerank`: the sources `Answer` and `Explain` see, best first.
 #[derive(Clone, Debug)]
-pub struct Reranked(pub Vec<Retrieved>);
+pub struct Reranked(Vec<Retrieved>);
+
+impl Reranked {
+    pub fn sources(&self) -> &[Retrieved] {
+        &self.0
+    }
+}
 
 fn ranked(hits: &[Retrieved]) -> Vec<RankedChunk> {
     hits.iter()

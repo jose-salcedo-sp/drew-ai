@@ -33,10 +33,10 @@ impl<TCategory> Answer<TCategory> {
 
 /// Output of `Answer<Boolean>`: the verdict, how sure System One is of it, and the sources it read.
 pub struct Decided {
-    pub yes: bool,
+    pub(super) yes: bool,
     /// `max(p, 1 - p)` for System One's probability of yes `p`.
-    pub confidence: Probability,
-    pub sources: Reranked,
+    pub(super) confidence: Probability,
+    pub(super) sources: Reranked,
 }
 
 /// The sources in reranked order, each under its title and heading, cut to System One's budget.

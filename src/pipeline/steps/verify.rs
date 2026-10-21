@@ -24,8 +24,14 @@ impl<TCategory> Default for Verify<TCategory> {
 
 /// Output of `Verify`: the answer and the sources its citations point into.
 pub struct Verified {
-    pub answer: VerifiedAnswer,
-    pub sources: Reranked,
+    answer: VerifiedAnswer,
+    sources: Reranked,
+}
+
+impl Verified {
+    pub fn into_parts(self) -> (VerifiedAnswer, Reranked) {
+        (self.answer, self.sources)
+    }
 }
 
 /// Every claim cites at least one chunk, and every cited chunk is among the run's reranked sources.
@@ -36,9 +42,23 @@ pub struct VerifiedAnswer {
 
 /// Output of `Verify<Boolean>`: the verified explanation and the verdict it supports.
 pub struct VerifiedVerdict {
-    pub verified: Verified,
-    pub yes: bool,
-    pub confidence: Probability,
+    verified: Verified,
+    yes: bool,
+    confidence: Probability,
+}
+
+impl VerifiedVerdict {
+    pub fn yes(&self) -> bool {
+        self.yes
+    }
+
+    pub fn confidence(&self) -> Probability {
+        self.confidence
+    }
+
+    pub fn into_verified(self) -> Verified {
+        self.verified
+    }
 }
 
 impl VerifiedAnswer {
