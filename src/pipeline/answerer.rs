@@ -107,13 +107,13 @@ impl PipelineAnswerer {
                 threshold(CategoryKind::Boolean, "rerank"),
                 system_one.clone(),
             ),
-            open: Seq(Explain::new(explain.clone()), Verify::new()),
+            open: Seq(Explain::new(Arc::clone(&explain)), Verify::new()),
             boolean: Seq(
                 AnswerStep::new(
                     system_one.clone(),
                     threshold(CategoryKind::Boolean, "answer"),
                 ),
-                Seq(Explain::new(explain.clone()), Verify::new()),
+                Seq(Explain::new(Arc::clone(&explain)), Verify::new()),
             ),
             config,
             embedding,

@@ -59,11 +59,11 @@ async fn app_mention_posts_placeholder_then_updates_with_answer() {
             category: Some(CategoryKind::Boolean),
             outcome: answered(),
         }),
-        runs: runs.clone(),
+        runs: Arc::<MemoryRunStore>::clone(&runs),
         keys: Arc::new("k:u".parse().unwrap()),
         admins: Arc::new(AdminUsers::default()),
     };
-    let api = slack.clone();
+    let api = Arc::clone(&slack);
     let event = serde_json::json!({
         "type": "app_mention",
         "user": "UJOSE",

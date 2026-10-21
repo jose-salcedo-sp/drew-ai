@@ -1004,7 +1004,7 @@ fn tune_command_reads_results_and_candidate_files() {
         r#"[{"name": "strict", "thresholds": {"answer": 0.5}, "per_category": {"choice": {"answer": 0.3}}}]"#,
     )
     .unwrap();
-    run_tune(TuneArgs {
+    run_tune(&TuneArgs {
         results: dir.join("results.json"),
         candidates: dir.join("candidates.json"),
         out: Some(dir.join("tune.json")),

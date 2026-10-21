@@ -102,7 +102,7 @@ pub async fn run(args: Args) -> eros::Result<()> {
             };
             run_golden(Arc::new(answerer), args.files, Some(setup)).await
         }
-        Command::Tune(args) => run_tune(args),
+        Command::Tune(args) => run_tune(&args),
     }
 }
 
@@ -149,7 +149,7 @@ pub async fn run_golden(
     eros::bail!("{} metric(s) regressed beyond tolerance", regressions.len())
 }
 
-pub fn run_tune(args: TuneArgs) -> eros::Result<()> {
+pub fn run_tune(args: &TuneArgs) -> eros::Result<()> {
     let results: Results = read_json(&args.results)?;
     let candidates: Vec<Candidate> = read_json(&args.candidates)?;
     let report = tune::tune(&results, &candidates);

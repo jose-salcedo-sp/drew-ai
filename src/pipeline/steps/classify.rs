@@ -178,7 +178,7 @@ mod tests {
     async fn classify(
         system_one: &Arc<ScriptedSystemOne>,
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
-        Classify::new(Some(system_one.clone()))
+        Classify::new(Some(Arc::<ScriptedSystemOne>::clone(system_one)))
             .run(
                 &Question::new("Does AGR_USERS hold role assignments?"),
                 Asked,

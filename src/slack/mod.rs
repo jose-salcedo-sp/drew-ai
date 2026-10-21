@@ -56,20 +56,20 @@ impl Bot {
         state: AppState,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> eros::Result<()> {
-        let api = self.api.clone();
+        let api = self.api;
         let mut backoff = std::time::Duration::from_secs(1);
         loop {
             if *shutdown.borrow() {
                 return Ok(());
             }
             let session_state = state.clone();
-            let api = api.clone();
+            let api = Arc::clone(&api);
             let shutdown_rx = shutdown.clone();
             let result = socket::run_socket(
-                api.clone(),
+                Arc::clone(&api),
                 move |event| {
                     let state = session_state.clone();
-                    let api = api.clone();
+                    let api = Arc::clone(&api);
                     tokio::spawn(async move {
                         if let Err(error) = handle_event(&state, api.as_ref(), event).await {
                             tracing::warn!(error = format!("{error:#?}"), "slack event failed");

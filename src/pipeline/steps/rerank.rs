@@ -166,7 +166,7 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
             let requests: Vec<_> = matches
                 .iter()
                 .map(|hit| {
-                    let (system_one, request) = (system_one.clone(), request(question, hit));
+                    let (system_one, request) = (Arc::clone(system_one), request(question, hit));
                     let id = hit.chunk.id.clone();
                     async move { judge(system_one.as_ref(), request, &id).await }
                 })

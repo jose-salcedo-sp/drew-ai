@@ -171,10 +171,11 @@ mod tests {
 
     async fn answer(p: f32) -> (Scored<Decided, AnswerRecord>, Arc<ScriptedSystemOne>) {
         let system_one = Arc::new(ScriptedSystemOne::new([Ok(noul(p))]));
-        let scored = Answer::<Boolean>::new(Some(system_one.clone()), None)
-            .run(&Question::new("Can a control map to a role?"), sources())
-            .await
-            .unwrap();
+        let scored =
+            Answer::<Boolean>::new(Some(Arc::<ScriptedSystemOne>::clone(&system_one)), None)
+                .run(&Question::new("Can a control map to a role?"), sources())
+                .await
+                .unwrap();
         (scored, system_one)
     }
 

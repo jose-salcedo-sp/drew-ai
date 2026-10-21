@@ -233,12 +233,12 @@ mod tests {
             .unwrap()
     }
 
-    fn tool_use(name: &str, input: Value) -> ContentBlock {
+    fn tool_use(name: &str, input: &Value) -> ContentBlock {
         ContentBlock::ToolUse(
             ToolUseBlock::builder()
                 .tool_use_id("t1")
                 .name(name)
-                .input(to_document(&input))
+                .input(to_document(input))
                 .build()
                 .unwrap(),
         )
@@ -295,7 +295,7 @@ mod tests {
             StopReason::ToolUse,
             vec![
                 ContentBlock::Text("Calling the tool.".into()),
-                tool_use(RESPOND_TOOL, input.clone()),
+                tool_use(RESPOND_TOOL, &input),
             ],
         );
 
@@ -313,7 +313,7 @@ mod tests {
         let output = output(
             StopReason::EndTurn,
             vec![
-                tool_use("other", json!({})),
+                tool_use("other", &json!({})),
                 ContentBlock::Text("I cannot".into()),
                 ContentBlock::Text(" comply.".into()),
             ],

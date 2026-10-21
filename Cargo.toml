@@ -18,6 +18,10 @@ unimplemented = "deny"
 dbg_macro = "deny"
 # A `std` lock guard held across `.await` blocks the runtime thread and can deadlock it.
 await_holding_lock = "deny"
+# A parameter that is only read is borrowed. `avoid-breaking-exported-api = false` (clippy.toml) extends this to `pub` fns.
+needless_pass_by_value = "deny"
+# `Arc::clone(&x)` marks the cheap clones, so every remaining `.clone()` is a deep copy worth reading.
+clone_on_ref_ptr = "deny"
 
 [dependencies]
 async-trait = "0.1.92"
