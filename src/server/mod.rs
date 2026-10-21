@@ -1,4 +1,9 @@
-//! OpenAI-compatible HTTP API: `/v1/models`, `/v1/chat/completions`, `/v1/runs/{id}`.
+//! OpenAI-compatible HTTP API (`drew serve`): `/v1/models`, `/v1/chat/completions`, `/v1/runs/{id}`. See
+//! `docs/design.md` section 4.
+//!
+//! This module owns HTTP: authentication, wire types, error bodies and markdown rendering. It answers through the
+//! [`Answerer`] port and persists every run through [`RunStore`] before responding. `drew serve` also starts the
+//! Slack bot ([`crate::slack`]) when it is configured.
 
 pub mod auth;
 pub mod error;
@@ -41,10 +46,13 @@ use self::{
     openai::{ChatRequest, Chunk, Completion, Drew, ModelList},
 };
 
+/// `drew serve` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// Database connection.
     #[command(flatten)]
     pub db: DbArgs,
+    /// Socket address to listen on.
     #[arg(long, env = "DREW_BIND", default_value = "0.0.0.0:8080")]
     pub bind: String,
     /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
@@ -53,20 +61,28 @@ pub struct Args {
     /// User ids that may read any persisted run, comma-separated.
     #[arg(long, env = "DREW_ADMIN_USERS", default_value = "")]
     pub admin_users: AdminUsers,
+    /// Models and tunables.
     #[command(flatten)]
     pub pipeline: PipelineArgs,
+    /// The Slack bot; off unless both tokens are set.
     #[command(flatten)]
     pub slack: crate::slack::SlackArgs,
 }
 
+/// What every handler shares; the Slack bot uses the same answerer and run store.
 #[derive(Clone)]
 pub struct AppState {
+    /// Runs the pipeline.
     pub answerer: Arc<dyn Answerer>,
+    /// Persists every run before it is returned.
     pub runs: Arc<dyn RunStore>,
+    /// Bearer keys and the users they map to.
     pub keys: Arc<ApiKeys>,
+    /// Users who may read any run.
     pub admins: Arc<AdminUsers>,
 }
 
+/// The API routes, each behind a bearer key. An unknown path gets an OpenAI-style 404 without authentication.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/models", get(models))
@@ -76,6 +92,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Runs `drew serve` until SIGINT or SIGTERM, then shuts the HTTP server and the Slack bot down gracefully.
+///
+/// # Errors
+///
+/// When the database, pipeline or Slack bot cannot be set up, the address cannot be bound, or the server fails.
 pub async fn run(args: Args) -> eros::Result<()> {
     let pool = store::connect(&args.db).await?;
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
