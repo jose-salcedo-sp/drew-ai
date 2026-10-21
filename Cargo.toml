@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [lints.clippy]
 # `Halted` carries the whole trace by design; halting is the rare path.
 result_large_err = "allow"
