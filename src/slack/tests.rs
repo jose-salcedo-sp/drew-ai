@@ -122,7 +122,7 @@ async fn app_mention_posts_placeholder_then_updates_with_answer() {
     let slack = Arc::new(FakeSlack::default());
     let runs = Arc::new(MemoryRunStore::default());
     let state = state(canned(answered()), Arc::<MemoryRunStore>::clone(&runs));
-    super::handle_event(&state, slack.as_ref(), mention())
+    super::handle_event(&state, slack.as_ref(), &mention())
         .await
         .unwrap();
 
@@ -152,7 +152,7 @@ async fn a_failed_run_posts_only_its_id_and_step_and_logs_the_error() {
     let slack = Arc::new(FakeSlack::default());
     let runs = Arc::new(MemoryRunStore::default());
     let state = state(canned(failed()), Arc::<MemoryRunStore>::clone(&runs));
-    super::handle_event(&state, slack.as_ref(), mention())
+    super::handle_event(&state, slack.as_ref(), &mention())
         .await
         .unwrap();
 
@@ -169,7 +169,7 @@ async fn an_unsaved_run_posts_only_its_id_and_logs_the_error() {
     let (logs, _guard) = Logs::capture();
     let slack = Arc::new(FakeSlack::default());
     let state = state(canned(failed()), Arc::new(FailingRunStore));
-    super::handle_event(&state, slack.as_ref(), mention())
+    super::handle_event(&state, slack.as_ref(), &mention())
         .await
         .unwrap();
 
@@ -199,7 +199,9 @@ mod socket {
     use crate::{
         pipeline::report::RunReport,
         slack::{
-            DRAIN_TIMEOUT, MAX_CONCURRENT_EVENTS,
+            BUSY_REPLY, DRAIN_TIMEOUT, MAX_CONCURRENT_EVENTS, MAX_QUEUED_EVENTS, PLACEHOLDER,
+            RESTART_NOTICE_TIMEOUT, RESTARTED_REPLY,
+            api::SlackApi,
             fakes::{FakeSocket, connection_pair},
             socket::{Backoff, Connector, Ending, IDLE_TIMEOUT, WebSocketConnector, run_session},
         },
@@ -533,6 +535,26 @@ mod socket {
         events: &[serde_json::Value],
         stop_after: Duration,
     ) -> (Arc<FakeSlack>, Duration) {
+        let slack = Arc::new(FakeSlack::default());
+        let (ran, ()) = serve_events_while(
+            Arc::<FakeSlack>::clone(&slack),
+            answerer,
+            events,
+            stop_after,
+            async {},
+        )
+        .await;
+        (slack, ran)
+    }
+
+    /// `serve_events` over `slack`, running `alongside` at the same time and returning its output.
+    async fn serve_events_while<T>(
+        slack: Arc<dyn SlackApi>,
+        answerer: Arc<dyn Answerer>,
+        events: &[serde_json::Value],
+        stop_after: Duration,
+        alongside: impl Future<Output = T>,
+    ) -> (Duration, T) {
         let socket = Arc::new(FakeSocket::default());
         let mut slack_end = socket.accept().await;
         slack_end.send(hello()).await.unwrap();
@@ -546,11 +568,10 @@ mod socket {
                 .await
                 .unwrap();
         }
-        let slack = Arc::new(FakeSlack::default());
-        let bot = Bot::new(Arc::<FakeSlack>::clone(&slack), socket);
+        let bot = Bot::new(slack, socket);
         let (stop, shutdown) = watch::channel(false);
         let started = Instant::now();
-        tokio::join!(
+        let ((), (), alongside) = tokio::join!(
             bot.run(
                 state(answerer, Arc::new(MemoryRunStore::default())),
                 shutdown
@@ -558,9 +579,77 @@ mod socket {
             async {
                 tokio::time::sleep(stop_after).await;
                 stop.send(true).unwrap();
-            }
+            },
+            alongside
         );
-        (slack, started.elapsed())
+        (started.elapsed(), alongside)
+    }
+
+    /// Posts like `FakeSlack`; an update never finishes.
+    struct HangingUpdates(FakeSlack);
+
+    #[async_trait]
+    impl SlackApi for HangingUpdates {
+        async fn open_connection(&self) -> eros::Result<String> {
+            self.0.open_connection().await
+        }
+
+        async fn post_message(
+            &self,
+            channel: &str,
+            thread_ts: Option<&str>,
+            text: &str,
+        ) -> eros::Result<String> {
+            self.0.post_message(channel, thread_ts, text).await
+        }
+
+        async fn update_message(&self, _: &str, _: &str, _: &str) -> eros::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    fn texts(messages: &[(String, Option<String>, String)], text: &str) -> usize {
+        messages.iter().filter(|(_, _, t)| t == text).count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_events_post_their_placeholder_before_they_wait() {
+        let slack = Arc::new(FakeSlack::default());
+        let events = vec![mention(); MAX_CONCURRENT_EVENTS + 2];
+        let (_, posted_early) = serve_events_while(
+            Arc::<FakeSlack>::clone(&slack),
+            Arc::new(SlowAnswerer::new(Duration::from_secs(10))),
+            &events,
+            Duration::from_secs(30),
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                slack.posts.lock().unwrap().clone()
+            },
+        )
+        .await;
+        assert_eq!(texts(&posted_early, PLACEHOLDER), events.len());
+        assert_eq!(slack.updates.lock().unwrap().len(), events.len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_past_the_queue_limit_get_a_busy_reply() {
+        let answerer = Arc::new(SlowAnswerer::new(Duration::from_secs(5)));
+        let admitted = MAX_CONCURRENT_EVENTS + MAX_QUEUED_EVENTS;
+        let events = vec![mention(); admitted + 2];
+        let (slack, _) = serve_events(
+            Arc::<SlowAnswerer>::clone(&answerer),
+            &events,
+            Duration::from_secs(60),
+        )
+        .await;
+        let posts = slack.posts.lock().unwrap();
+        assert_eq!(texts(&posts, PLACEHOLDER), admitted);
+        assert_eq!(texts(&posts, BUSY_REPLY), 2);
+        assert!(posts.iter().all(|(channel, thread, _)| {
+            channel == "C1" && thread.as_deref() == Some("100.001")
+        }));
+        assert_eq!(slack.updates.lock().unwrap().len(), admitted);
+        assert_eq!(answerer.peak.load(Ordering::SeqCst), MAX_CONCURRENT_EVENTS);
     }
 
     #[tokio::test(start_paused = true)]
@@ -603,13 +692,73 @@ mod socket {
             stop_after,
         )
         .await;
-        assert!(slack.updates.lock().unwrap().is_empty());
         let deadline = stop_after + DRAIN_TIMEOUT;
         assert!(
             ran >= deadline && ran < deadline + Duration::from_secs(1),
             "{ran:?}"
         );
-        assert!(logs.text().contains("abandoned=1"), "{}", logs.text());
+        assert_eq!(slack.updates.lock().unwrap().len(), 1);
+        let logs = logs.text();
+        assert!(logs.contains("abandoned=1"), "{logs}");
+        assert!(!logs.contains("cancelled"), "{logs}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abandoned_events_get_a_restart_notice_in_place_of_their_placeholder() {
+        let events = vec![mention(); MAX_CONCURRENT_EVENTS + 1];
+        let (slack, _) = serve_events(
+            Arc::new(SlowAnswerer::new(Duration::from_secs(3600))),
+            &events,
+            Duration::from_secs(1),
+        )
+        .await;
+        let mut placeholders: Vec<_> = slack
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, (channel, _, _))| (channel.clone(), format!("{}.0001", i + 1)))
+            .collect();
+        let mut notices: Vec<_> = slack
+            .updates
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(channel, ts, text)| {
+                assert_eq!(text, RESTARTED_REPLY);
+                (channel.clone(), ts.clone())
+            })
+            .collect();
+        placeholders.sort();
+        notices.sort();
+        assert_eq!(placeholders.len(), events.len());
+        assert_eq!(notices, placeholders);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_notices_give_up_after_their_timeout() {
+        let (logs, _guard) = Logs::capture();
+        let stop_after = Duration::from_secs(1);
+        let (ran, ()) = serve_events_while(
+            Arc::new(HangingUpdates(FakeSlack::default())),
+            Arc::new(SlowAnswerer::new(Duration::from_secs(3600))),
+            &[mention(), mention()],
+            stop_after,
+            async {},
+        )
+        .await;
+        let deadline = stop_after + DRAIN_TIMEOUT + RESTART_NOTICE_TIMEOUT;
+        assert!(
+            ran >= deadline && ran < deadline + Duration::from_secs(1),
+            "{ran:?}"
+        );
+        let logs = logs.text();
+        assert_eq!(
+            logs.matches("restart notices still unsent").count(),
+            1,
+            "{logs}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -637,7 +786,7 @@ async fn bot_messages_are_ignored() {
     super::handle_event(
         &state,
         slack.as_ref(),
-        serde_json::json!({ "type": "message", "bot_id": "B1", "text": "hi" }),
+        &serde_json::json!({ "type": "message", "bot_id": "B1", "text": "hi" }),
     )
     .await
     .unwrap();
