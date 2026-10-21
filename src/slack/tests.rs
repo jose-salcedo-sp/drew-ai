@@ -1,11 +1,17 @@
-use std::sync::Arc;
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     domain::{CategoryKind, Question, Score},
-    pipeline::report::{Answer, CannedAnswerer, Outcome, Verdict},
+    pipeline::report::{Answer, Answerer, CannedAnswerer, Outcome, Verdict},
     server::{AppState, auth::AdminUsers},
     slack::{Bot, SlackArgs, fakes::FakeSlack, strip_mentions},
-    store::fakes::MemoryRunStore,
+    store::{
+        RunStore,
+        fakes::{FailingRunStore, MemoryRunStore},
+    },
 };
 
 fn answered() -> Outcome {
@@ -17,6 +23,70 @@ fn answered() -> Outcome {
         why: vec![],
         citations: vec![],
     })
+}
+
+fn failed() -> Outcome {
+    Outcome::Failed {
+        at: "answer".into(),
+        error: "POST https://system-one.internal/v1/decide: 502 body=<html>upstream</html>".into(),
+    }
+}
+
+fn state(answerer: Arc<dyn Answerer>, runs: Arc<dyn RunStore>) -> AppState {
+    AppState {
+        answerer,
+        runs,
+        keys: Arc::new("k:u".parse().unwrap()),
+        admins: Arc::new(AdminUsers::default()),
+    }
+}
+
+fn canned(outcome: Outcome) -> Arc<dyn Answerer> {
+    Arc::new(CannedAnswerer {
+        category: Some(CategoryKind::Boolean),
+        outcome,
+    })
+}
+
+fn mention() -> serde_json::Value {
+    serde_json::json!({
+        "type": "app_mention",
+        "user": "UJOSE",
+        "text": "<@UBOT> What is AGR_USERS?",
+        "channel": "C1",
+        "ts": "100.001"
+    })
+}
+
+/// Collects the log lines written on this thread while the guard lives.
+#[derive(Clone, Default)]
+pub(super) struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl Logs {
+    pub(super) fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        let logs = Self::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        (logs, tracing::subscriber::set_default(subscriber))
+    }
+
+    pub(super) fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -49,29 +119,10 @@ fn strip_mention_removes_bot_tag() {
 
 #[tokio::test]
 async fn app_mention_posts_placeholder_then_updates_with_answer() {
-    let slack = Arc::new(FakeSlack {
-        ws_url: "ws://127.0.0.1:9".into(),
-        ..Default::default()
-    });
+    let slack = Arc::new(FakeSlack::default());
     let runs = Arc::new(MemoryRunStore::default());
-    let state = AppState {
-        answerer: Arc::new(CannedAnswerer {
-            category: Some(CategoryKind::Boolean),
-            outcome: answered(),
-        }),
-        runs: Arc::<MemoryRunStore>::clone(&runs),
-        keys: Arc::new("k:u".parse().unwrap()),
-        admins: Arc::new(AdminUsers::default()),
-    };
-    let api = Arc::clone(&slack);
-    let event = serde_json::json!({
-        "type": "app_mention",
-        "user": "UJOSE",
-        "text": "<@UBOT> What is AGR_USERS?",
-        "channel": "C1",
-        "ts": "100.001"
-    });
-    super::handle_event(&state, api.as_ref(), event)
+    let state = state(canned(answered()), Arc::<MemoryRunStore>::clone(&runs));
+    super::handle_event(&state, slack.as_ref(), mention())
         .await
         .unwrap();
 
@@ -96,20 +147,46 @@ async fn app_mention_posts_placeholder_then_updates_with_answer() {
 }
 
 #[tokio::test]
+async fn a_failed_run_posts_only_its_id_and_step_and_logs_the_error() {
+    let (logs, _guard) = Logs::capture();
+    let slack = Arc::new(FakeSlack::default());
+    let runs = Arc::new(MemoryRunStore::default());
+    let state = state(canned(failed()), Arc::<MemoryRunStore>::clone(&runs));
+    super::handle_event(&state, slack.as_ref(), mention())
+        .await
+        .unwrap();
+
+    let run_id = runs.stored()[0].report.id;
+    let updates = slack.updates.lock().unwrap();
+    assert_eq!(updates[0].2, format!("Run {run_id} failed at answer."));
+    let logs = logs.text();
+    assert!(logs.contains("system-one.internal"), "{logs}");
+    assert_eq!(logs.matches("system-one.internal").count(), 1, "{logs}");
+}
+
+#[tokio::test]
+async fn an_unsaved_run_posts_only_its_id_and_logs_the_error() {
+    let (logs, _guard) = Logs::capture();
+    let slack = Arc::new(FakeSlack::default());
+    let state = state(canned(failed()), Arc::new(FailingRunStore));
+    super::handle_event(&state, slack.as_ref(), mention())
+        .await
+        .unwrap();
+
+    let updates = slack.updates.lock().unwrap();
+    let text = &updates[0].2;
+    assert!(text.starts_with("Run "), "{text}");
+    assert!(text.ends_with(" could not be completed."), "{text}");
+    assert!(!text.contains("postgres"), "{text}");
+    assert!(!text.contains("system-one"), "{text}");
+    let logs = logs.text();
+    assert_eq!(logs.matches("db.internal").count(), 1, "{logs}");
+}
+
+#[tokio::test]
 async fn bot_messages_are_ignored() {
     let slack = Arc::new(FakeSlack::default());
-    let state = AppState {
-        answerer: Arc::new(CannedAnswerer {
-            category: None,
-            outcome: Outcome::Failed {
-                at: "explain".into(),
-                error: "timeout".into(),
-            },
-        }),
-        runs: Arc::new(MemoryRunStore::default()),
-        keys: Arc::new("k:u".parse().unwrap()),
-        admins: Arc::new(AdminUsers::default()),
-    };
+    let state = state(canned(failed()), Arc::new(MemoryRunStore::default()));
     super::handle_event(
         &state,
         slack.as_ref(),

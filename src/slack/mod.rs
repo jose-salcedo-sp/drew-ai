@@ -160,31 +160,28 @@ async fn answer_in_slack(
         .post_message(channel, thread_ts, "Looking that up...")
         .await?;
     let report = state.answerer.answer(question).await;
-    let run_id = report.id;
     let user = UserId(format!("slack:{slack_user}"));
-    let text = match persist_and_render(state, &user, &report).await {
-        Ok(content) => content,
-        Err(error) => {
-            tracing::error!(%run_id, error = format!("{error:#?}"), "slack run failed");
-            format!("Run {run_id} could not be completed: {error:#?}")
-        }
-    };
+    let text = persist_and_render(state, &user, &report).await;
     api.update_message(channel, &placeholder_ts, &text).await?;
     Ok(())
 }
 
-async fn persist_and_render(
-    state: &AppState,
-    user: &UserId,
-    report: &RunReport,
-) -> eros::Result<String> {
-    state.runs.save(user, report).await?;
-    let id = report.id.to_string();
-    Ok(match &report.outcome {
+/// Slack replies go to shared channels, so a failure shows only the run id; the detail goes to the log.
+async fn persist_and_render(state: &AppState, user: &UserId, report: &RunReport) -> String {
+    let run_id = report.id;
+    if let Err(error) = state.runs.save(user, report).await {
+        tracing::error!(%run_id, error = format!("{error:#?}"), "slack run not persisted");
+        return format!("Run {run_id} could not be completed.");
+    }
+    let id = run_id.to_string();
+    match &report.outcome {
         Outcome::Answered(answer) => render::answer(answer, &id),
         Outcome::Declined { sources, .. } => render::declined(sources, &id),
-        Outcome::Failed { at, error } => format!("Run {id} failed at {at}: {error}"),
-    })
+        Outcome::Failed { at, error } => {
+            tracing::error!(%run_id, at, error, "slack run failed");
+            format!("Run {id} failed at {at}.")
+        }
+    }
 }
 
 /// Removes Slack user mentions (`<@U…>`) from mention text.

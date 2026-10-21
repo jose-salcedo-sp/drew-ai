@@ -40,6 +40,20 @@ impl RunStore for MemoryRunStore {
     }
 }
 
+/// Fails every call, with a message like a database error's, for error-path tests.
+pub struct FailingRunStore;
+
+#[async_trait]
+impl RunStore for FailingRunStore {
+    async fn save(&self, _: &UserId, _: &RunReport) -> eros::Result<()> {
+        eros::bail!("pool timed out connecting to postgres://drew@db.internal:5432/drew")
+    }
+
+    async fn get(&self, _: RunId) -> eros::Result<Option<StoredRun>> {
+        eros::bail!("pool timed out connecting to postgres://drew@db.internal:5432/drew")
+    }
+}
+
 impl MemoryRunStore {
     pub fn stored(&self) -> Vec<StoredRun> {
         self.runs
