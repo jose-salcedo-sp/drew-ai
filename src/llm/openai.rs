@@ -35,6 +35,8 @@ async fn post(client: &reqwest::Client, url: &str, body: &Value) -> eros::Result
     Ok(serde_json::from_str(&text)?)
 }
 
+/// [`ChatModel`] over `POST {base_url}/chat/completions`. A request schema becomes a strict `json_schema`
+/// response format.
 pub struct OpenAiChat {
     client: reqwest::Client,
     base_url: String,
@@ -52,6 +54,7 @@ impl OpenAiChat {
     }
 }
 
+/// The `chat/completions` request body.
 pub fn chat_body(model: &str, request: &ChatRequest) -> Value {
     let mut body = json!({
         "model": model,
@@ -72,6 +75,10 @@ pub fn chat_body(model: &str, request: &ChatRequest) -> Value {
 }
 
 /// The first choice's content, without the `<think>` block reasoning models such as Qwen3 may prepend.
+///
+/// # Errors
+///
+/// When the response has no `choices[0].message.content` string.
 pub fn chat_text(response: &Value) -> eros::Result<String> {
     let content = response["choices"][0]["message"]["content"]
         .as_str()
@@ -99,6 +106,7 @@ impl ChatModel for OpenAiChat {
     }
 }
 
+/// [`Embedder`] over `POST {base_url}/embeddings`, in batches of 64. Ignores [`EmbedPurpose`].
 pub struct OpenAiEmbedder {
     client: reqwest::Client,
     base_url: String,
@@ -116,6 +124,11 @@ impl OpenAiEmbedder {
     }
 }
 
+/// The vectors of an `embeddings` response, reordered by their `index`.
+///
+/// # Errors
+///
+/// When the response does not parse, or holds other than `count` vectors of [`EMBEDDING_DIM`].
 pub fn embeddings(response: &Value, count: usize) -> eros::Result<Vec<Vec<f32>>> {
     #[derive(Deserialize)]
     struct Response {

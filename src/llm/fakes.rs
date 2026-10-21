@@ -49,6 +49,7 @@ pub struct ScriptedChat {
 }
 
 impl ScriptedChat {
+    /// Each call to `complete` takes the next response; once they run out, it fails.
     pub fn new(responses: impl IntoIterator<Item = eros::Result<ChatResponse>>) -> Self {
         Self {
             model: ModelRef::new("fake-scripted-chat", "1"),
@@ -57,6 +58,7 @@ impl ScriptedChat {
         }
     }
 
+    /// [`ScriptedChat::new`] with successful replies of these texts.
     pub fn replying(texts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self::new(texts.into_iter().map(|text| {
             Ok(ChatResponse {
@@ -66,6 +68,7 @@ impl ScriptedChat {
         }))
     }
 
+    /// Every request received so far, in order.
     pub fn requests(&self) -> Vec<ChatRequest> {
         self.requests
             .lock()
@@ -101,6 +104,7 @@ pub struct ScriptedSystemOne {
 }
 
 impl ScriptedSystemOne {
+    /// Each call to `decide` takes the next response; once they run out, it fails.
     pub fn new(responses: impl IntoIterator<Item = eros::Result<DecisionResponse>>) -> Self {
         Self {
             responses: Mutex::new(responses.into_iter().collect()),
@@ -108,6 +112,7 @@ impl ScriptedSystemOne {
         }
     }
 
+    /// Every request received so far, in order, with `model` set as sent.
     pub fn requests(&self) -> Vec<DecisionRequest> {
         self.requests
             .lock()
