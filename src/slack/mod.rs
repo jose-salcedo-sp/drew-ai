@@ -39,7 +39,7 @@ impl Bot {
         match (set(&args.app_token), set(&args.bot_token)) {
             (None, None) => Ok(None),
             (Some(app), Some(bot)) => Ok(Some(Self {
-                api: Arc::new(SlackClient::new(app, bot)),
+                api: Arc::new(SlackClient::new(app, bot)?),
             })),
             _ => {
                 eros::bail!("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must both be set or both unset")

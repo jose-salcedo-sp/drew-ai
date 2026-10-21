@@ -1,10 +1,15 @@
 //! Slack Web API client for Socket Mode and chat updates.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::Deserialize;
 
 const SLACK_API: &str = "https://slack.com/api/";
+/// Web API methods answer in about a second; this bounds a hung call so its event task ends.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait SlackApi: Send + Sync {
@@ -27,13 +32,21 @@ pub struct SlackClient {
 }
 
 impl SlackClient {
-    pub fn new(app_token: String, bot_token: String) -> Self {
-        Self {
-            http: HttpClient::new(),
+    pub fn new(app_token: String, bot_token: String) -> eros::Result<Self> {
+        Ok(Self {
+            http: http_client()?,
             app_token,
             bot_token,
-        }
+        })
     }
+}
+
+#[eros::context("build the Slack HTTP client")]
+fn http_client() -> eros::Result<HttpClient> {
+    Ok(HttpClient::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()?)
 }
 
 #[derive(Deserialize)]

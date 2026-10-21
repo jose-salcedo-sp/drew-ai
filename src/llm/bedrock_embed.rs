@@ -1,6 +1,9 @@
 //! `Embedder` over Bedrock (Titan Text Embeddings v2 or Cohere Embed v3, 1024 dimensions).
 
+use std::time::Duration;
+
 use async_trait::async_trait;
+use aws_config::{BehaviorVersion, timeout::TimeoutConfig};
 use aws_sdk_bedrockruntime::{Client, error::DisplayErrorContext, primitives::Blob};
 use eros::{Context, bail};
 use futures::{StreamExt, TryStreamExt, stream};
@@ -16,6 +19,9 @@ const COHERE_MAX_CHARS: usize = 2_048;
 const COHERE_MAX_BATCH: usize = 96;
 /// Titan embeds one text per call, so calls run concurrently.
 const CONCURRENT_CALLS: usize = 8;
+/// One call embeds at most a `COHERE_MAX_BATCH` batch; this bounds it including its retries.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct EmbedArgs {
@@ -154,7 +160,14 @@ pub struct BedrockEmbedder {
 impl BedrockEmbedder {
     pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
         let family = Family::of(&args.embed_model)?;
-        let config = aws_config::load_from_env().await;
+        let timeouts = TimeoutConfig::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .operation_timeout(OPERATION_TIMEOUT)
+            .build();
+        let config = aws_config::defaults(BehaviorVersion::latest())
+            .timeout_config(timeouts)
+            .load()
+            .await;
         Ok(Self {
             client: Client::new(&config),
             model_id: args.embed_model.clone(),

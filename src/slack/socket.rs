@@ -1,6 +1,6 @@
 //! Socket Mode: ack envelopes, dispatch events, reconnect with backoff.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -8,13 +8,24 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::api::SlackApi;
 
+/// Covers DNS, TCP, and the TLS and WebSocket handshakes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub async fn run_socket(
     api: Arc<dyn SlackApi>,
     mut on_event: impl FnMut(Value) + Send,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> eros::Result<()> {
     let url = api.open_connection().await?;
-    let (ws, _) = connect_async(&url).await?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "bounded by CONNECT_TIMEOUT below"
+    )]
+    let connecting = connect_async(&url);
+    let Ok(connected) = tokio::time::timeout(CONNECT_TIMEOUT, connecting).await else {
+        eros::bail!("slack websocket connect timed out after {CONNECT_TIMEOUT:?}");
+    };
+    let (ws, _) = connected?;
     let (mut write, mut read) = ws.split();
     loop {
         tokio::select! {
