@@ -15,11 +15,13 @@ use crate::{
 
 use super::{RunStore, StoredRun};
 
+/// The production [`RunStore`].
 pub struct PgRunStore {
     pool: PgPool,
 }
 
 impl PgRunStore {
+    /// Wraps a pool whose migrations have run.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

@@ -17,6 +17,7 @@ use super::Source;
 
 const INTRO: &str = "intro";
 
+/// Where the markdown corpus is and how its paths split into layers.
 #[derive(Debug, clap::Args)]
 pub struct MarkdownArgs {
     /// Root directory of Drew-audited markdown files.
@@ -37,6 +38,8 @@ pub struct MarkdownArgs {
     pub skip: Vec<PathBuf>,
 }
 
+/// The markdown [`Source`]: walks the docs root for `*.md` files, skipping dot-directories, and turns each file in a
+/// layer into a [`Document`].
 #[derive(Clone)]
 pub struct Connector {
     root: PathBuf,
@@ -46,6 +49,12 @@ pub struct Connector {
 }
 
 impl Connector {
+    /// `None` when `DREW_DOCS_DIR` is unset, so the source is not configured.
+    ///
+    /// # Errors
+    ///
+    /// When the docs root is not a directory, the base URL does not parse, or a layer path is absolute, contains
+    /// `..`, does not exist under the root, or is listed twice.
     pub fn from_args(args: &MarkdownArgs) -> eros::Result<Option<Self>> {
         let Some(root) = args.docs.clone() else {
             return Ok(None);
@@ -220,7 +229,13 @@ struct Section {
     text: String,
 }
 
-/// One chunk per non-empty heading section; headings inside fenced code blocks are ignored.
+/// One chunk per non-empty heading section; headings inside fenced code blocks are ignored. Front matter is
+/// dropped. Text before the first heading becomes the `intro` chunk. Section URLs get a GitHub-style anchor only
+/// when `file_url` is absolute.
+///
+/// # Errors
+///
+/// None today: every input splits into sections.
 pub fn chunks(file_url: &str, content: &str, authoritative: bool) -> eros::Result<Vec<ChunkDraft>> {
     let body = strip_front_matter(content);
     let sections = sections(body)?;
