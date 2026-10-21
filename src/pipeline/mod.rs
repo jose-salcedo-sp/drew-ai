@@ -1,4 +1,85 @@
 //! Typestate pipeline with a Writer-style trace. See `docs/design.md` section 5.
+//!
+//! Invalid pipelines do not compile. There is no `Answer<Open>` step, so `Decisive<Open>` is not a pipeline:
+//!
+//! ```compile_fail,E0599
+//! use drew::pipeline::{Open, Pipeline, Run, steps::{Decisive, Reranked}};
+//!
+//! async fn decide(pipeline: &Decisive<Open>, run: Run<Open, Reranked>) {
+//!     let _ = pipeline.drive(run).await;
+//! }
+//! ```
+//!
+//! Only the classification join can change a run's category:
+//!
+//! ```compile_fail,E0624
+//! use drew::pipeline::{Asked, Boolean, Run, Unclassified};
+//!
+//! fn skip_classify(run: Run<Unclassified, Asked>) -> Run<Boolean, Asked> {
+//!     run.classified()
+//! }
+//! ```
+//!
+//! Only its own step can build a step's output, so a later step cannot be handed sources, a verdict, or claims
+//! that no step produced. Each of these does not compile:
+//!
+//! ```compile_fail,E0423
+//! use drew::{domain::AtLeastOne, pipeline::steps::Candidates, retrieval::Retrieved};
+//!
+//! fn forge(hits: AtLeastOne<Retrieved>) -> Candidates { Candidates(hits) }
+//! ```
+//!
+//! ```compile_fail,E0423
+//! use drew::{pipeline::steps::Reranked, retrieval::Retrieved};
+//!
+//! fn forge(hits: Vec<Retrieved>) -> Reranked { Reranked(hits) }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use drew::{domain::Probability, pipeline::steps::{Decided, Reranked}};
+//!
+//! fn forge(sources: Reranked, confidence: Probability) -> Decided {
+//!     Decided { yes: true, confidence, sources }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use drew::pipeline::steps::{Explained, Explanation, Reranked};
+//!
+//! fn forge(explanation: Explanation, sources: Reranked) -> Explained {
+//!     Explained { explanation, sources }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use drew::{domain::Probability, pipeline::steps::{Explained, ExplainedVerdict}};
+//!
+//! fn forge(explained: Explained, confidence: Probability) -> ExplainedVerdict {
+//!     ExplainedVerdict { explained, yes: true, confidence }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use drew::pipeline::steps::{Reranked, Verified, VerifiedAnswer};
+//!
+//! fn forge(answer: VerifiedAnswer, sources: Reranked) -> Verified {
+//!     Verified { answer, sources }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use drew::{domain::Probability, pipeline::steps::{Verified, VerifiedVerdict}};
+//!
+//! fn forge(verified: Verified, confidence: Probability) -> VerifiedVerdict {
+//!     VerifiedVerdict { verified, yes: true, confidence }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use drew::{domain::Cited, pipeline::steps::VerifiedAnswer};
+//!
+//! fn forge(claims: Vec<Cited<String>>) -> VerifiedAnswer { VerifiedAnswer { claims } }
+//! ```
 
 pub mod answerer;
 pub mod report;
@@ -11,7 +92,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{CategoryKind, Question, RunId, Score},
+    domain::{CategoryKind, Probability, Question, RunId},
     llm::ModelRef,
 };
 
@@ -76,7 +157,7 @@ pub trait Step: Send + Sync {
     type Record: Into<TraceRecord> + Send;
 
     /// Minimum score to continue. A step with a threshold must return a score.
-    fn threshold(&self) -> Option<Score> {
+    fn threshold(&self) -> Option<Probability> {
         None
     }
 
@@ -90,7 +171,7 @@ pub trait Step: Send + Sync {
 pub struct Scored<TOutput, TRecord> {
     pub output: TOutput,
     pub record: TRecord,
-    pub score: Option<Score>,
+    pub score: Option<Probability>,
     pub model: Option<ModelRef>,
     pub prompt_version: Option<&'static str>,
 }
@@ -106,7 +187,7 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
         }
     }
 
-    pub fn with_score(self, score: Score) -> Self {
+    pub fn with_score(self, score: Probability) -> Self {
         Self {
             score: Some(score),
             ..self
@@ -202,8 +283,8 @@ pub struct Halted {
 pub enum Halt {
     Declined {
         reason: DeclineReason,
-        score: Option<Score>,
-        threshold: Option<Score>,
+        score: Option<Probability>,
+        threshold: Option<Probability>,
     },
     Failed {
         error: String,
@@ -453,7 +534,7 @@ impl<TStep: Step> Pipeline for TStep {
 
 /// Composes two pipelines; only a valid pipeline when the first one's output is the second one's input.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use drew::{domain::Question, pipeline::{trace::VerifyRecord, *}};
 ///
 /// struct A;

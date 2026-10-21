@@ -8,8 +8,8 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     config::RerankConfig,
-    domain::{ChunkId, Question, Score},
-    llm::system_one::{Decision, DecisionAnswer, DecisionRequest, SystemOne},
+    domain::{ChunkId, Probability, Question},
+    llm::system_one::{Decision, DecisionRequest, SystemOne},
     pipeline::{Category, DeclineReason, Scored, Step, StepError, trace::RerankRecord},
     retrieval::Retrieved,
 };
@@ -28,14 +28,15 @@ const RRF_K: f32 = 60.0;
 ///
 /// With System One, the best `candidates` matches by fused score are each judged by one yes/no question. Matches
 /// are then ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes rank, so the
-/// judgement refines retrieval instead of replacing it; their score is the probability of yes. Without System One,
-/// matches are ordered by retrieval rank alone and keep their fused score. Either way an evidence match is ranked
+/// judgement refines retrieval instead of replacing it; the trace records each probability of yes, and the best
+/// kept one scores the step. Without System One, matches are ordered by retrieval rank alone and the step is
+/// unscored. Matches always keep their fused score. Either way an evidence match is ranked
 /// `evidence_rank_penalty` places lower, so Drew's settled answers lead unless the evidence is clearly better.
 pub struct Rerank<TCategory> {
     top_k: usize,
     candidates: usize,
     evidence_rank_penalty: usize,
-    threshold: Option<Score>,
+    threshold: Option<Probability>,
     system_one: Option<Arc<dyn SystemOne>>,
     category: PhantomData<TCategory>,
 }
@@ -54,7 +55,7 @@ impl<TCategory> Rerank<TCategory> {
 
     pub fn from_config(
         config: &RerankConfig,
-        threshold: Option<Score>,
+        threshold: Option<Probability>,
         system_one: Option<Arc<dyn SystemOne>>,
     ) -> Self {
         Self {
@@ -123,14 +124,14 @@ async fn judge(
     system_one: &dyn SystemOne,
     request: DecisionRequest,
     chunk: &ChunkId,
-) -> Result<f32, StepError> {
+) -> Result<Probability, StepError> {
     let response = system_one.decide(request).await?;
-    match response.answers.get(QUESTION_ID) {
-        Some(DecisionAnswer::Noul { noul }) => Ok(*noul),
-        other => Err(StepError::decline(DeclineReason::InvalidModelOutput(
-            format!("expected a yes/no answer for {}, got {other:?}", chunk.0),
-        ))),
-    }
+    response.yes_no(QUESTION_ID).map_err(|error| {
+        StepError::decline(DeclineReason::InvalidModelOutput(format!(
+            "{}: {error}",
+            chunk.0
+        )))
+    })
 }
 
 impl<TCategory: Category> Step for Rerank<TCategory> {
@@ -141,7 +142,7 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
     type Record = RerankRecord;
 
     /// Without System One the step is unscored, so no threshold applies.
-    fn threshold(&self) -> Option<Score> {
+    fn threshold(&self) -> Option<Probability> {
         self.threshold.filter(|_| self.system_one.is_some())
     }
 
@@ -152,6 +153,7 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
     ) -> Result<Scored<Reranked, RerankRecord>, StepError> {
         let (mut matches, context): (Vec<Retrieved>, Vec<Retrieved>) = input
             .0
+            .into_vec()
             .into_iter()
             .partition(|hit| hit.context_for.is_none());
         matches.sort_by(|a, b| b.score.0.total_cmp(&a.score.0));
@@ -159,10 +161,10 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
         let penalty = self.evidence_rank_penalty;
         let mut raw = None;
         let mut model = None;
-        let mut best = None;
+        let mut judged: HashMap<ChunkId, Probability> = HashMap::new();
         if let Some(system_one) = &self.system_one {
             matches.truncate(self.candidates);
-            let judged = model.insert(system_one.model()).clone();
+            let judged_by = model.insert(system_one.model()).clone();
             let requests: Vec<_> = matches
                 .iter()
                 .map(|hit| {
@@ -171,19 +173,20 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
                     async move { judge(system_one.as_ref(), request, &id).await }
                 })
                 .collect();
-            let probabilities: Vec<f32> = stream::iter(requests)
+            let probabilities: Vec<Probability> = stream::iter(requests)
                 .buffered(CONCURRENT_REQUESTS)
                 .try_collect()
                 .await
-                .map_err(|error| error.with_model(judged, RERANK_PROMPT_VERSION))?;
-            let by_chunk: BTreeMap<&str, f32> = matches
+                .map_err(|error| error.with_model(judged_by, RERANK_PROMPT_VERSION))?;
+            let by_chunk: BTreeMap<&str, Probability> = matches
                 .iter()
                 .zip(&probabilities)
                 .map(|(hit, p)| (hit.chunk.id.0.as_str(), *p))
                 .collect();
             raw = serde_json::to_string(&by_chunk).ok();
             let mut by_probability: Vec<usize> = (0..matches.len()).collect();
-            by_probability.sort_by(|&a, &b| probabilities[b].total_cmp(&probabilities[a]));
+            by_probability
+                .sort_by(|&a, &b| probabilities[b].get().total_cmp(&probabilities[a].get()));
             let mut judged_rank = vec![0; matches.len()];
             for (rank, &index) in by_probability.iter().enumerate() {
                 judged_rank[index] = rank;
@@ -192,20 +195,15 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
                 .drain(..)
                 .zip(probabilities)
                 .enumerate()
-                .map(|(retrieval_rank, (mut hit, probability))| {
+                .map(|(retrieval_rank, (hit, probability))| {
                     let key = rrf(&hit, retrieval_rank, penalty)
                         + rrf(&hit, judged_rank[retrieval_rank], penalty);
-                    hit.score = Score(probability);
+                    judged.insert(hit.chunk.id.clone(), probability);
                     (key, hit)
                 })
                 .collect();
             fused.sort_by(|a, b| b.0.total_cmp(&a.0));
             matches = fused.into_iter().map(|(_, hit)| hit).collect();
-            matches.truncate(self.top_k);
-            best = matches
-                .iter()
-                .map(|hit| hit.score)
-                .max_by(|a, b| a.0.total_cmp(&b.0));
         } else {
             let mut ordered: Vec<(f32, Retrieved)> = matches
                 .drain(..)
@@ -216,6 +214,10 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
             matches = ordered.into_iter().map(|(_, hit)| hit).collect();
         }
         matches.truncate(self.top_k);
+        let best = matches
+            .iter()
+            .filter_map(|hit| judged.get(&hit.chunk.id).copied())
+            .max_by(|a, b| a.get().total_cmp(&b.get()));
 
         let mut context_of: HashMap<ChunkId, Vec<Retrieved>> = HashMap::new();
         for chunk in context {
@@ -233,6 +235,9 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
         }
         // Matches first, so eval's hit@5 reads the top five matches.
         let mut chunks = ranked(&matches);
+        for chunk in &mut chunks {
+            chunk.probability = judged.get(&chunk.chunk.id).copied();
+        }
         chunks.extend(ranked(&kept_context));
         let record = RerankRecord { raw, chunks };
         let scored = Scored::new(Reranked(sources), record);
@@ -254,15 +259,16 @@ mod tests {
         domain::Chunk,
         llm::{
             ModelRef,
-            system_one::{DecisionResponse, SystemOne},
+            system_one::{DecisionAnswer, DecisionResponse, SystemOne},
         },
-        pipeline::{Open, steps::fixtures::chunk},
+        pipeline::{Open, StepErrorKind, steps::fixtures::chunk},
+        retrieval::Relevance,
     };
 
     fn hit(locator: &str, text: &str, score: f32) -> Retrieved {
         Retrieved {
             chunk: chunk(locator, "Roles", text),
-            score: Score(score),
+            score: Relevance(score),
             context_for: None,
         }
     }
@@ -270,7 +276,7 @@ mod tests {
     fn context(of: &Retrieved, locator: &str, score: f32) -> Retrieved {
         Retrieved {
             chunk: chunk(locator, "Roles", "context"),
-            score: Score(score),
+            score: Relevance(score),
             context_for: Some(of.chunk.id.clone()),
         }
     }
@@ -308,9 +314,13 @@ mod tests {
 
     async fn rerank(rerank: Rerank<Open>, hits: Vec<Retrieved>) -> Scored<Reranked, RerankRecord> {
         rerank
-            .run(&Question::new("q"), Candidates(hits))
+            .run(&Question::new("q"), candidates(hits))
             .await
             .unwrap()
+    }
+
+    fn candidates(hits: Vec<Retrieved>) -> Candidates {
+        Candidates(crate::domain::AtLeastOne::try_from(hits).unwrap())
     }
 
     #[tokio::test]
@@ -365,13 +375,40 @@ mod tests {
 
         // Judged ranks second, third, best; fused with retrieval ranks best, second, third.
         assert_eq!(ids(&scored.output), ["fused-second", "fused-best"]);
-        assert_eq!(scored.score, Some(Score(0.95)));
+        assert_eq!(scored.score, Some(Probability::new(0.95).unwrap()));
         assert_eq!(scored.prompt_version, Some(RERANK_PROMPT_VERSION));
         let raw: BTreeMap<String, f32> =
             serde_json::from_str(scored.record.raw.as_deref().unwrap()).unwrap();
         assert_eq!(raw.len(), 3);
-        assert_eq!(scored.output.0[0].score, Score(0.95));
-        assert_eq!(scored.output.0[1].score, Score(0.2));
+        assert_eq!(scored.output.0[0].score, Relevance(0.8));
+        let judged: Vec<_> = scored
+            .record
+            .chunks
+            .iter()
+            .map(|c| (c.score, c.probability.map(Probability::get)))
+            .collect();
+        assert_eq!(
+            judged,
+            [(Relevance(0.8), Some(0.95)), (Relevance(0.9), Some(0.2))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probability_outside_zero_to_one_declines_as_invalid_output() {
+        for bad in ["p=1.7", "p=-0.3", "p=NaN"] {
+            let error = Rerank::<Open>::new(1, 25, Some(Arc::new(ByText)))
+                .run(&Question::new("q"), candidates(vec![hit("a", bad, 0.9)]))
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(
+                    error.kind,
+                    StepErrorKind::Decline(DeclineReason::InvalidModelOutput(_))
+                ),
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -400,7 +437,7 @@ mod tests {
                 text: "x".repeat(MAX_STATE_CHARS * 2),
                 ..chunk("long", "Roles", "")
             },
-            score: Score(1.0),
+            score: Relevance(1.0),
             context_for: None,
         };
         let state = state(&long);

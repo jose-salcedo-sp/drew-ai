@@ -2,14 +2,15 @@ use super::{
     trace::{StepOutcome, TraceRecord, VerifyRecord},
     *,
 };
+use crate::domain::Probability;
 
 struct Fetched(u32);
 struct Doubled(u32);
 
 struct Fetch<TCategory> {
     value: u32,
-    score: f32,
-    threshold: Option<f32>,
+    score: Probability,
+    threshold: Option<Probability>,
     category: PhantomData<TCategory>,
 }
 
@@ -20,8 +21,8 @@ impl<TCategory: Category> Step for Fetch<TCategory> {
     type Output = Fetched;
     type Record = VerifyRecord;
 
-    fn threshold(&self) -> Option<Score> {
-        self.threshold.map(Score)
+    fn threshold(&self) -> Option<Probability> {
+        self.threshold
     }
 
     async fn run(
@@ -29,7 +30,7 @@ impl<TCategory: Category> Step for Fetch<TCategory> {
         _question: &Question,
         _input: Asked,
     ) -> Result<Scored<Fetched, VerifyRecord>, StepError> {
-        Ok(Scored::new(Fetched(self.value), empty_record()).with_score(Score(self.score)))
+        Ok(Scored::new(Fetched(self.value), empty_record()).with_score(self.score))
     }
 }
 
@@ -87,11 +88,15 @@ fn open_run() -> Run<Open, Asked> {
     Run::new(Question::new("does it work?")).classified()
 }
 
+fn probability(value: f32) -> Probability {
+    Probability::new(value).unwrap()
+}
+
 fn fetch<TCategory>(score: f32, threshold: Option<f32>) -> Fetch<TCategory> {
     Fetch {
         value: 21,
-        score,
-        threshold,
+        score: probability(score),
+        threshold: threshold.map(probability),
         category: PhantomData,
     }
 }
@@ -182,4 +187,27 @@ fn trace_round_trips_through_json() {
     };
     let json = serde_json::to_string(&entry).unwrap();
     assert_eq!(serde_json::from_str::<TraceEntry>(&json).unwrap(), entry);
+}
+
+#[test]
+fn stored_scores_stay_bare_numbers_and_are_checked_on_read() {
+    let outcome = |score: &str| {
+        format!(
+            r#"{{"status": "declined", "reason": {{"kind": "low_confidence"}}, "score": {score}, "threshold": 0.5}}"#
+        )
+    };
+    let read = serde_json::from_str::<StepOutcome>(&outcome("0.25")).unwrap();
+    assert_eq!(
+        read,
+        StepOutcome::Declined {
+            reason: DeclineReason::LowConfidence,
+            score: Some(probability(0.25)),
+            threshold: Some(probability(0.5)),
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&read).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&outcome("0.25")).unwrap()
+    );
+    assert!(serde_json::from_str::<StepOutcome>(&outcome("1.7")).is_err());
 }

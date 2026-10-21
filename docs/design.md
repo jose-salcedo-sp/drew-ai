@@ -111,7 +111,7 @@ pub trait Step: Send + Sync {
     type Output: Send;
     type Record: Into<TraceRecord> + Send;
 
-    fn threshold(&self) -> Option<Score> { None }
+    fn threshold(&self) -> Option<Probability> { None }
 
     fn run(&self, question: &Question, input: Self::Input)
         -> impl Future<Output = Result<Scored<Self::Output, Self::Record>, StepError>> + Send;
@@ -134,7 +134,7 @@ pub struct Halted {
 }
 
 pub enum Halt {
-    Declined { reason: DeclineReason, score: Option<Score>, threshold: Option<Score> },
+    Declined { reason: DeclineReason, score: Option<Probability>, threshold: Option<Probability> },
     Failed { error: String },
 }
 ```

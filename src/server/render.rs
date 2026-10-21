@@ -16,7 +16,10 @@ pub fn answer(answer: &Answer) -> String {
     match &answer.verdict {
         Some(Verdict::Boolean { yes, confidence }) => {
             let verdict = if *yes { "Yes" } else { "No" };
-            blocks.push(format!("**{verdict}** (confidence {:.2})", confidence.0));
+            blocks.push(format!(
+                "**{verdict}** (confidence {:.2})",
+                confidence.get()
+            ));
         }
         Some(Verdict::Choice { selected, rejected }) => {
             blocks.push(format!(
@@ -174,7 +177,7 @@ fn text(raw: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        domain::Score,
+        domain::Probability,
         pipeline::report::Rejected,
         server::fixtures::{citation, cited, from_prompt},
     };
@@ -184,7 +187,7 @@ mod tests {
         let answer = Answer {
             verdict: Some(Verdict::Boolean {
                 yes: true,
-                confidence: Score(0.92),
+                confidence: Probability::new(0.92).unwrap(),
             }),
             why: vec![
                 cited("AGR_USERS assigns roles to users.", &[1]),

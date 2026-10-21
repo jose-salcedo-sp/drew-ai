@@ -390,7 +390,7 @@ async fn a_boolean_question_gets_system_one_s_verdict_and_the_llm_s_reasons() {
     assert_eq!(report.category, Some(CategoryKind::Boolean));
     assert!(matches!(
         answer.verdict,
-        Some(Verdict::Boolean { yes: false, confidence }) if (confidence.0 - 0.8).abs() < 1e-6
+        Some(Verdict::Boolean { yes: false, confidence }) if (confidence.get() - 0.8).abs() < 1e-6
     ));
     assert_eq!(answer.citations.len(), 1);
     let names: Vec<_> = steps(&report).into_iter().map(|(step, _)| step).collect();
@@ -474,7 +474,7 @@ async fn an_unsure_verdict_declines_at_the_configured_threshold() {
     assert!(matches!(
         &report.outcome,
         Outcome::Declined { at, reason: DeclineReason::LowConfidence, score: Some(score), threshold: Some(threshold), .. }
-            if at == "answer" && (score.0 - 0.6).abs() < 1e-6 && threshold.0 == 0.7
+            if at == "answer" && (score.get() - 0.6).abs() < 1e-6 && threshold.get() == 0.7
     ));
     assert!(chat.requests().is_empty());
 }

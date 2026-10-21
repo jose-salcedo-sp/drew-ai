@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{CategoryKind, ChunkRef, Cited, Question, RunId, Score};
+use crate::domain::{CategoryKind, ChunkRef, Cited, Probability, Question, RunId};
 
 use super::{DeclineReason, trace::Trace};
 
@@ -23,8 +23,8 @@ pub enum Outcome {
     Declined {
         at: String,
         reason: DeclineReason,
-        score: Option<Score>,
-        threshold: Option<Score>,
+        score: Option<Probability>,
+        threshold: Option<Probability>,
         /// Best reranked sources, shown under the fixed decline message.
         sources: Vec<Citation>,
     },
@@ -49,7 +49,7 @@ pub struct Answer {
 pub enum Verdict {
     Boolean {
         yes: bool,
-        confidence: Score,
+        confidence: Probability,
     },
     Choice {
         selected: Cited<String>,

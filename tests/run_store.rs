@@ -11,8 +11,8 @@ use axum::{
 };
 use drew::{
     domain::{
-        AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Provenance, Question,
-        RunId, Score, Span, UserId,
+        AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance,
+        Question, RunId, Span, UserId,
     },
     pipeline::{
         DeclineReason,
@@ -88,7 +88,7 @@ fn reports() -> Vec<(RunReport, &'static str)> {
         at: "answer".into(),
         reason: DeclineReason::InvalidModelOutput("missing field `selected`".into()),
         score: None,
-        threshold: Some(Score(0.7)),
+        threshold: Some(Probability::new(0.7).unwrap()),
         sources: vec![citation()],
     };
     let failed = Outcome::Failed {

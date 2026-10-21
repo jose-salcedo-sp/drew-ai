@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    domain::Question,
+    domain::{AtLeastOne, Question},
     pipeline::{
         Asked, DeclineReason, Scored, Step, StepError, Unclassified, trace::RetrieveRecord,
     },
@@ -36,9 +36,9 @@ impl Step for Retrieve {
         let record = RetrieveRecord {
             chunks: ranked(&hits),
         };
-        if hits.is_empty() {
+        let Ok(hits) = AtLeastOne::try_from(hits) else {
             return Err(StepError::decline(DeclineReason::NoSources).with_record(record));
-        }
+        };
         Ok(Scored::new(Candidates(hits), record))
     }
 }

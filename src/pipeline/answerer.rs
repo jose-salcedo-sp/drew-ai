@@ -8,7 +8,7 @@ use sqlx::PgPool;
 
 use crate::{
     config::{ConfigArgs, PipelineConfig},
-    domain::{CategoryKind, Chunk, Provenance, Question, RunId, Score},
+    domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
         self, ChatModel, ModelRef,
         bedrock_chat::ChatArgs,
@@ -23,7 +23,7 @@ use super::{
     report::{Answer, Answerer, Citation, Outcome, RunReport, Verdict},
     steps::{
         Answer as AnswerStep, Candidates, Classify, Decisive, Explain, OpenEnded, Rerank, Reranked,
-        Retrieve, Verified, VerifiedVerdict, Verify,
+        Retrieve, Verified, Verify,
     },
     trace::Trace,
 };
@@ -95,7 +95,7 @@ impl PipelineAnswerer {
         let threshold = |category, step| config.threshold(category, step);
         Self {
             classify: Classify::new(system_one.clone())
-                .with_min_confidence(config.classify.min_confidence.map(Score)),
+                .with_min_confidence(config.classify.min_confidence),
             retrieve,
             rerank_open: Rerank::from_config(
                 &config.rerank,
@@ -209,22 +209,15 @@ impl Answerer for PipelineAnswerer {
         // `Halted` carries no state, so a later decline lists the sources kept here.
         let mut report = match classified {
             Classified::Boolean(run) => {
-                let sources = run.state().0.clone();
+                let sources = run.state().sources().to_vec();
                 match self.boolean.drive(run).await {
                     Ok(run) => {
                         let (id, question, decided, trace) = run.into_parts();
-                        let VerifiedVerdict {
-                            verified,
-                            yes,
-                            confidence,
-                        } = decided;
-                        answered_report(
-                            id,
-                            question,
-                            verified,
-                            trace,
-                            Some(Verdict::Boolean { yes, confidence }),
-                        )
+                        let verdict = Verdict::Boolean {
+                            yes: decided.yes(),
+                            confidence: decided.confidence(),
+                        };
+                        answered_report(id, question, decided.into_verified(), trace, Some(verdict))
                     }
                     Err(halted) => halted_report(halted, &sources),
                 }
@@ -232,7 +225,7 @@ impl Answerer for PipelineAnswerer {
             Classified::Choice(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Ranking(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Open(run) => {
-                let sources = run.state().0.clone();
+                let sources = run.state().sources().to_vec();
                 match self.open.drive(run).await {
                     Ok(run) => {
                         let (id, question, verified, trace) = run.into_parts();
@@ -264,10 +257,11 @@ fn answer_not_implemented<TCategory: Category>(run: Run<TCategory, Reranked>) ->
 fn answered_report(
     id: RunId,
     question: Question,
-    Verified { answer, sources }: Verified,
+    verified: Verified,
     trace: Trace,
     verdict: Option<Verdict>,
 ) -> RunReport {
+    let (answer, sources) = verified.into_parts();
     let why = answer.into_claims();
     let mut cited = HashSet::new();
     let citations = why
@@ -278,7 +272,7 @@ fn answered_report(
             Provenance::UserPrompt(_) => None,
         })
         .filter(|id| cited.insert(*id))
-        .filter_map(|id| sources.0.iter().find(|hit| &hit.chunk.id == id))
+        .filter_map(|id| sources.sources().iter().find(|hit| &hit.chunk.id == id))
         .map(|hit| citation(&hit.chunk))
         .collect();
     RunReport {
