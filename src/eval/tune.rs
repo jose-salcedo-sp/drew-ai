@@ -12,14 +12,18 @@ use crate::{
 
 use super::metrics::{CATEGORIES, EvalRun, Metric, Results, cell, percent, scope_name};
 
+/// Launch gate: the least answered precision, in `0..=1`.
 pub const MIN_ANSWERED_PRECISION: f64 = 0.95;
+/// Launch gate: the highest decline rate, in `0..=1`.
 pub const MAX_DECLINE_RATE: f64 = 0.40;
 
 /// One entry of the candidates file (a JSON array). `thresholds` and `per_category` are `config/drew.json`'s.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
+    /// Labels the candidate in the report.
     pub name: String,
+    /// Minimum score per step; a step not listed has no threshold.
     #[serde(default)]
     pub thresholds: Thresholds,
     /// Overrides `thresholds` for runs the pipeline classified into that category.
@@ -27,37 +31,53 @@ pub struct Candidate {
     pub per_category: PerCategory,
 }
 
+/// The `drew eval tune` output.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TuneReport {
+    /// One per candidate, in the candidates file's order.
     pub candidates: Vec<CandidateReport>,
 }
 
+/// How one candidate would have done.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CandidateReport {
+    /// The candidate's name.
     pub name: String,
+    /// See [`TuneStats::meets_launch_gate`], over all runs.
     pub meets_launch_gate: bool,
+    /// Over all runs.
     pub overall: TuneStats,
     /// Grouped by the golden (expected) category, in `CATEGORIES` order.
     pub per_category: Vec<CategoryTuneStats>,
 }
 
+/// The replayed stats of the runs whose golden category is `category`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CategoryTuneStats {
+    /// The golden (expected) category.
     pub category: CategoryKind,
+    /// Its stats.
     #[serde(flatten)]
     pub stats: TuneStats,
 }
 
+/// Replayed outcomes over a set of runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TuneStats {
+    /// Runs in the set.
     pub runs: usize,
+    /// Runs that would still be answered.
     pub answered: usize,
+    /// Runs that would decline, including `unresolved`.
     pub declined: usize,
     /// Declined runs that originally halted on low confidence at a step this candidate would pass.
     /// What follows that step was never recorded, so they stay declined.
     pub unresolved: usize,
+    /// Runs that failed; thresholds do not change them.
     pub failed: usize,
+    /// Declined runs among all runs.
     pub decline_rate: Metric,
+    /// Correct answers among graded answered runs.
     pub answered_precision: Metric,
 }
 
@@ -104,6 +124,8 @@ fn replay(run: &EvalRun, candidate: &Candidate) -> Replayed {
     }
 }
 
+/// Replays every run under each candidate. A run declines at the first recorded step score below the candidate's
+/// threshold; otherwise it keeps its recorded outcome.
 pub fn tune(results: &Results, candidates: &[Candidate]) -> TuneReport {
     TuneReport {
         candidates: candidates
@@ -161,6 +183,8 @@ impl TuneStats {
         }
     }
 
+    /// Answered precision at least [`MIN_ANSWERED_PRECISION`] and decline rate at most [`MAX_DECLINE_RATE`]; `false`
+    /// when either has no runs.
     pub fn meets_launch_gate(&self) -> bool {
         let precision = self.answered_precision.value;
         let decline = self.decline_rate.value;

@@ -1,4 +1,9 @@
-//! `drew eval`: golden-set metrics per step, and threshold tuning over persisted runs.
+//! `drew eval`: golden-set metrics per step, and threshold tuning over persisted runs. See `docs/design.md`
+//! section 6.
+//!
+//! `drew eval run` answers every [`golden`] question through an [`Answerer`], scores each run from its trace
+//! ([`metrics`]), and gates against a baseline. `drew eval tune` re-applies candidate thresholds to a results file's
+//! recorded scores without calling any model ([`tune`]). Eval reads runs; it never writes the database.
 
 pub mod golden;
 pub mod metrics;
@@ -29,12 +34,15 @@ use self::{
     tune::Candidate,
 };
 
+/// `drew eval` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// `run` or `tune`.
     #[command(subcommand)]
     pub command: Command,
 }
 
+/// The `drew eval` subcommands.
 #[derive(Debug, clap::Subcommand)]
 #[expect(clippy::large_enum_variant, reason = "parsed once at startup")]
 pub enum Command {
@@ -44,16 +52,21 @@ pub enum Command {
     Tune(TuneArgs),
 }
 
+/// `drew eval run` options.
 #[derive(Debug, clap::Args)]
 pub struct RunCommand {
+    /// Inputs, outputs and selection.
     #[command(flatten)]
     pub files: RunArgs,
+    /// Database connection.
     #[command(flatten)]
     pub db: DbArgs,
+    /// Models and tunables.
     #[command(flatten)]
     pub pipeline: PipelineArgs,
 }
 
+/// What `drew eval run` reads and writes, independent of the pipeline it runs.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
     /// Golden set, JSONL.
@@ -74,6 +87,7 @@ pub struct RunArgs {
     pub questions: Vec<String>,
 }
 
+/// `drew eval tune` options.
 #[derive(Debug, clap::Args)]
 pub struct TuneArgs {
     /// Results JSON written by `drew eval run`.
@@ -87,6 +101,11 @@ pub struct TuneArgs {
     pub out: Option<PathBuf>,
 }
 
+/// Runs `drew eval`.
+///
+/// # Errors
+///
+/// As [`run_golden`] or [`run_tune`], or when the database or pipeline cannot be set up.
 pub async fn run(args: Args) -> eros::Result<()> {
     match args.command {
         Command::Run(args) => {
@@ -106,7 +125,13 @@ pub async fn run(args: Args) -> eros::Result<()> {
     }
 }
 
+/// Answers the golden set, writes the results file, and compares it with the baseline when one is given.
 /// `setup`, when known, is printed before the first question and recorded in the results file.
+///
+/// # Errors
+///
+/// When a file cannot be read, parsed or written, a selected question id is unknown, the baseline cannot be
+/// restricted to the selection, or any metric regressed beyond its tolerance.
 pub async fn run_golden(
     answerer: Arc<dyn Answerer>,
     args: RunArgs,
@@ -149,6 +174,11 @@ pub async fn run_golden(
     eros::bail!("{} metric(s) regressed beyond tolerance", regressions.len())
 }
 
+/// Replays every candidate over the results file, prints the report, and writes it when `out` is set.
+///
+/// # Errors
+///
+/// When a file cannot be read, parsed or written.
 pub fn run_tune(args: &TuneArgs) -> eros::Result<()> {
     let results: Results = read_json(&args.results)?;
     let candidates: Vec<Candidate> = read_json(&args.candidates)?;

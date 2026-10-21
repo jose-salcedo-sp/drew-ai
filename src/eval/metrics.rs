@@ -22,9 +22,12 @@ use crate::{
 
 use super::golden::GoldenQuestion;
 
+/// Retrieved chunks that count for recall.
 pub const RECALL_K: usize = 50;
+/// Reranked matches that count for a hit.
 pub const HIT_K: usize = 5;
 
+/// The order per-category metrics are reported in.
 pub const CATEGORIES: [CategoryKind; 4] = [
     CategoryKind::Boolean,
     CategoryKind::Choice,
@@ -38,46 +41,66 @@ pub struct Results {
     /// What the runs ran with. `None` in files written before it was recorded, and for scripted answerers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<RunSetup>,
+    /// Computed from `runs`.
     pub metrics: MetricsReport,
+    /// One per golden question, in golden-set order.
     pub runs: Vec<EvalRun>,
 }
 
 /// The configuration and models behind a results file, so two files can be compared knowing what changed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunSetup {
+    /// When the first question was sent.
     pub started_at: DateTime<Utc>,
+    /// When the last run finished; `None` until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
+    /// Path of the golden set, as given.
     pub golden: String,
     /// `git describe --always --dirty` of the working tree, when it is a git checkout.
     pub git: Option<String>,
+    /// Every tunable the pipeline ran with.
     pub config: PipelineConfig,
+    /// The models it called.
     pub models: Models,
 }
 
+/// One golden question, its run, and how the run scored.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EvalRun {
+    /// The question and its expected answer.
     pub golden: GoldenQuestion,
     /// Derived from `golden` and `report`; kept for reading the file, never read back.
     pub scores: RunScores,
+    /// The full run, trace included; tuning re-reads its recorded scores.
     pub report: RunReport,
 }
 
 /// One run's contribution to each metric. `None` means the run does not count toward that metric.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunScores {
+    /// The run's category equals the golden one; `None` when the run halted before `Classify` recorded one.
     pub classified_correctly: Option<bool>,
+    /// Fraction of the golden relevant chunks among the first [`RECALL_K`] retrieved, in `0..=1`; `None` when the
+    /// golden question lists none or retrieval left no record.
     pub recall_at_50: Option<f64>,
+    /// A golden relevant chunk is among the first [`HIT_K`] reranked matches; `None` as for `recall_at_50`.
     pub hit_at_5: Option<bool>,
+    /// The verdict matches the expected answer; `None` unless answered with something to grade.
     pub answer_correct: Option<bool>,
+    /// The run declined.
     pub declined: bool,
+    /// The run failed.
     pub failed: bool,
+    /// Every citation is a chunk this run retrieved or reranked; `None` unless answered.
     pub citations_valid: Option<bool>,
 }
 
 /// Told about each golden question as its run starts and finishes, in completion order.
 pub trait Progress: Sync {
+    /// The question was sent to the answerer.
     fn started(&self, golden: &GoldenQuestion);
+    /// The run finished and was scored; `elapsed` is its wall-clock time.
     fn finished(&self, run: &EvalRun, elapsed: Duration);
 }
 
@@ -112,6 +135,7 @@ pub async fn evaluate(
 }
 
 impl Results {
+    /// Computes the metrics; no setup.
     pub fn new(runs: Vec<EvalRun>) -> Self {
         Self {
             setup: None,
@@ -122,6 +146,7 @@ impl Results {
 }
 
 impl EvalRun {
+    /// Scores `report` against `golden`.
     pub fn new(golden: GoldenQuestion, report: RunReport) -> Self {
         Self {
             scores: RunScores::of(&golden, &report),
@@ -132,6 +157,7 @@ impl EvalRun {
 }
 
 impl RunScores {
+    /// Scores one run from its outcome and the last record of each step in its trace.
     pub fn of(golden: &GoldenQuestion, report: &RunReport) -> Self {
         let expected = golden.expected.category();
         let classify = last_record(report, |record| match record {
@@ -263,40 +289,57 @@ fn cited_chunks(answer: &Answer) -> impl Iterator<Item = &ChunkId> {
         })
 }
 
+/// Every metric, overall and per golden category.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricsReport {
+    /// Over every run.
     pub overall: Metrics,
     /// Grouped by the golden (expected) category, in `CATEGORIES` order.
     pub per_category: Vec<CategoryMetrics>,
 }
 
+/// The metrics of the runs whose golden category is `category`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CategoryMetrics {
+    /// The golden (expected) category.
     pub category: CategoryKind,
+    /// Its metrics.
     #[serde(flatten)]
     pub metrics: Metrics,
 }
 
+/// The per-step metrics over a set of runs; each is a mean of the matching [`RunScores`] field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {
+    /// Runs in the set.
     pub runs: usize,
+    /// Mean of [`RunScores::classified_correctly`].
     pub classification_accuracy: Metric,
+    /// Mean of [`RunScores::recall_at_50`].
     pub retrieval_recall_at_50: Metric,
+    /// Mean of [`RunScores::hit_at_5`].
     pub rerank_hit_at_5: Metric,
+    /// Mean of [`RunScores::answer_correct`]: correct answers among graded answered runs.
     pub answer_precision: Metric,
+    /// Declined runs among all runs.
     pub decline_rate: Metric,
+    /// Failed runs among all runs.
     pub failure_rate: Metric,
+    /// Mean of [`RunScores::citations_valid`].
     pub citation_validity: Metric,
 }
 
 /// A mean over the `n` runs that count toward it; `value` is `None` when `n` is 0.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metric {
+    /// The mean; in `0..=1` for every metric this module computes.
     pub value: Option<f64>,
+    /// Runs that counted.
     pub n: usize,
 }
 
 impl Metric {
+    /// The arithmetic mean of `values`.
     pub fn mean(values: impl IntoIterator<Item = f64>) -> Self {
         let (sum, n) = values
             .into_iter()
@@ -307,12 +350,14 @@ impl Metric {
         }
     }
 
+    /// The fraction of `true`s.
     pub fn rate(hits: impl IntoIterator<Item = bool>) -> Self {
         Self::mean(hits.into_iter().map(|hit| if hit { 1.0 } else { 0.0 }))
     }
 }
 
 impl MetricsReport {
+    /// Groups runs by their golden category.
     pub fn of(runs: &[EvalRun]) -> Self {
         let scores = |category: Option<CategoryKind>| {
             runs.iter()
@@ -331,6 +376,7 @@ impl MetricsReport {
         }
     }
 
+    /// The metrics of one golden category; `None` only for a report that lacks it.
     pub fn category(&self, category: CategoryKind) -> Option<&Metrics> {
         self.per_category
             .iter()
@@ -340,6 +386,7 @@ impl MetricsReport {
 }
 
 impl Metrics {
+    /// Aggregates the scores of a set of runs.
     pub fn of<'a>(scores: impl Iterator<Item = &'a RunScores> + Clone) -> Self {
         Self {
             runs: scores.clone().count(),
@@ -355,6 +402,7 @@ impl Metrics {
         }
     }
 
+    /// The field `name` refers to.
     pub fn get(&self, name: MetricName) -> Metric {
         match name {
             MetricName::ClassificationAccuracy => self.classification_accuracy,
@@ -370,19 +418,28 @@ impl Metrics {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Names a [`Metrics`] field; the serde name is the field name, as used in baseline `tolerances`.
 pub enum MetricName {
+    /// [`Metrics::classification_accuracy`].
     ClassificationAccuracy,
+    /// [`Metrics::retrieval_recall_at_50`].
     #[serde(rename = "retrieval_recall_at_50")]
     RetrievalRecallAt50,
+    /// [`Metrics::rerank_hit_at_5`].
     #[serde(rename = "rerank_hit_at_5")]
     RerankHitAt5,
+    /// [`Metrics::answer_precision`].
     AnswerPrecision,
+    /// [`Metrics::decline_rate`].
     DeclineRate,
+    /// [`Metrics::failure_rate`].
     FailureRate,
+    /// [`Metrics::citation_validity`].
     CitationValidity,
 }
 
 impl MetricName {
+    /// Every metric, in report order.
     pub const ALL: [Self; 7] = [
         Self::ClassificationAccuracy,
         Self::RetrievalRecallAt50,
@@ -393,10 +450,12 @@ impl MetricName {
         Self::CitationValidity,
     ];
 
+    /// `false` for the decline and failure rates, where a rise is the regression.
     pub fn higher_is_better(self) -> bool {
         !matches!(self, Self::DeclineRate | Self::FailureRate)
     }
 
+    /// Short column label for terminal tables.
     pub fn label(self) -> &'static str {
         match self {
             Self::ClassificationAccuracy => "classify",
@@ -413,6 +472,7 @@ impl MetricName {
 /// A previous results file (or any JSON with its `metrics`), plus per-metric tolerances.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Baseline {
+    /// The metrics to compare against.
     pub metrics: MetricsReport,
     /// Allowed drop (or rise, for decline and failure rates) before a metric counts as regressed. Missing means 0.
     #[serde(default)]
@@ -424,6 +484,10 @@ pub struct Baseline {
 
 impl Baseline {
     /// The baseline as if it had run only the questions in `ids`.
+    ///
+    /// # Errors
+    ///
+    /// When the baseline has no recorded runs, or did not run every id.
     #[eros::context("restricting the baseline to {:?}", ids)]
     pub fn restricted_to(self, ids: &[String]) -> eros::Result<Self> {
         eros::ensure!(
@@ -449,14 +513,18 @@ impl Baseline {
     }
 }
 
+/// A metric worse than the baseline by more than its tolerance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Regression {
     /// `None` for the overall metrics.
     pub category: Option<CategoryKind>,
+    /// Which metric.
     pub metric: MetricName,
+    /// The baseline value.
     pub baseline: f64,
     /// `None` when no run counted toward the metric this time.
     pub current: Option<f64>,
+    /// The allowed change that was exceeded.
     pub tolerance: f64,
 }
 

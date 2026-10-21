@@ -10,13 +10,17 @@ use crate::{
     pipeline::report::Verdict,
 };
 
+/// One verified question with its expected category, answer and relevant chunks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GoldenQuestion {
+    /// Unique within the set; selects the question with `--question`.
     pub id: String,
     /// Hand-written placeholder, not mined from a real thread.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synthetic: bool,
+    /// Asked verbatim.
     pub question: Question,
+    /// Serialized as `category` and `expected` keys.
     #[serde(flatten)]
     pub expected: Expected,
     /// Chunks a correct retrieval should surface; recall@50 and hit@5 are measured against these.
@@ -29,22 +33,28 @@ pub struct GoldenQuestion {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "category", content = "expected", rename_all = "snake_case")]
 pub enum Expected {
+    /// The expected yes or no.
     Boolean(YesNo),
     /// The correct option text.
     Choice(String),
     /// Item texts in the expected order.
     Ranking(Vec<String>),
+    /// No verdict to grade; only classification, retrieval and citations are scored.
     Open,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// A boolean golden answer, spelled `yes` or `no` in the file.
 pub enum YesNo {
+    /// Serialized `yes`.
     Yes,
+    /// Serialized `no`.
     No,
 }
 
 impl Expected {
+    /// The category the question should be classified as.
     pub fn category(&self) -> CategoryKind {
         match self {
             Self::Boolean(_) => CategoryKind::Boolean,
@@ -54,7 +64,8 @@ impl Expected {
         }
     }
 
-    /// `None` when there is nothing to grade automatically (`open`).
+    /// Whether `verdict` is the expected answer, comparing option and item texts case-insensitively after
+    /// trimming. `None` when there is nothing to grade automatically (`open`).
     pub fn matches(&self, verdict: Option<&Verdict>) -> Option<bool> {
         let matched = match (self, verdict) {
             (Self::Open, _) => return None,
@@ -81,14 +92,22 @@ fn same_text(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
+/// A golden-set line that does not parse or fails validation.
 #[derive(Debug, thiserror::Error)]
 #[error("line {line}: {message}")]
 pub struct GoldenError {
+    /// 1-based line number.
     pub line: usize,
+    /// What is wrong with it.
     pub message: String,
 }
 
 /// Parses a JSONL golden set. Blank lines are skipped; line numbers in errors are 1-based.
+///
+/// # Errors
+///
+/// [`GoldenError`] for the first line that is not valid JSON, has a blank id or question, a blank choice option,
+/// a ranking of fewer than 2 items, or an id already used.
 pub fn parse(text: &str) -> eros::Result<Vec<GoldenQuestion>, (GoldenError,)> {
     let mut questions = Vec::new();
     let mut ids = HashSet::new();

@@ -29,6 +29,7 @@ pub struct Bar {
 }
 
 impl Bar {
+    /// Prints the starting line and starts the bar's spinner.
     pub fn new(total: usize, concurrency: usize) -> Self {
         let bar = ProgressBar::new(total as u64);
         bar.set_style(
@@ -53,6 +54,7 @@ impl Bar {
         }
     }
 
+    /// Clears the bar; the per-question lines stay.
     pub fn finish(&self) {
         self.bar.finish_and_clear();
     }
