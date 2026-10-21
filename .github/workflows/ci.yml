@@ -60,7 +60,7 @@ jobs:
 
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: cargo-nextest@0.9.148,cargo-binstall@1.26.0
+          tool: cargo-nextest@0.9.148,cargo-binstall@1.26.0,cargo-audit@0.22.2
 
       # install-action has no mbx manifest; binstall takes the release binary and never builds from source.
       - name: Install mbx
@@ -102,6 +102,9 @@ jobs:
 
       - name: cargo test --doc
         run: cargo test --doc
+
+      - name: cargo audit
+        run: cargo audit
 
       - name: Upload JUnit report
         if: ${{ !cancelled() }}
