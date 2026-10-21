@@ -395,6 +395,77 @@ mod socket {
         assert!(logs.text().contains("malformed slack envelope"));
     }
 
+    /// Delivers `frames`, then nothing; a send never completes, like a stalled link.
+    struct StalledSends(std::collections::VecDeque<Message>);
+
+    impl Stream for StalledSends {
+        type Item = Result<Message, tungstenite::Error>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            match self.0.pop_front() {
+                Some(frame) => std::task::Poll::Ready(Some(Ok(frame))),
+                None => std::task::Poll::Pending,
+            }
+        }
+    }
+
+    impl Sink<Message> for StalledSends {
+        type Error = tungstenite::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_is_queued_even_when_its_ack_never_finishes() {
+        let event = json!({ "type": "app_mention" });
+        let connection = Box::pin(StalledSends(
+            [
+                hello(),
+                envelope(&json!({
+                    "type": "events_api",
+                    "envelope_id": "E1",
+                    "payload": { "event": event },
+                })),
+            ]
+            .into(),
+        ));
+        let mut events = Vec::new();
+        let mut backoff = Backoff::default();
+        tokio::select! {
+            _ = run_session(connection, &mut backoff, |event| events.push(event)) => {
+                panic!("the session cannot end while its ack is stalled")
+            }
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+        assert_eq!(events, [event]);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_silent_link_ends_the_session_after_the_idle_timeout() {
         let (bot, mut slack) = connection_pair().await;

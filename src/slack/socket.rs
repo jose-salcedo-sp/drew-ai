@@ -140,6 +140,7 @@ fn jitter(delay: Duration) -> Duration {
 }
 
 /// Serves one connection until it fails or Slack ends it, and tells `backoff` when `hello` arrives.
+/// `on_event` must not block: it runs on the session loop, before the event's ack.
 ///
 /// A `disconnect` with `too_many_websockets` or an unknown reason is a failure.
 #[eros::context("serve a Slack Socket Mode session")]
@@ -181,12 +182,14 @@ pub async fn run_session(
                         }
                     }
                     Some("events_api") => {
+                        // Before the ack: shutdown can cancel the send after Slack has the ack,
+                        // and Slack does not resend an acked event.
+                        if let Some(event) = envelope.pointer("/payload/event").cloned() {
+                            on_event(event);
+                        }
                         if let Some(id) = envelope.get("envelope_id").and_then(Value::as_str) {
                             let ack = json!({ "envelope_id": id }).to_string();
                             connection.send(Message::Text(ack.into())).await?;
-                        }
-                        if let Some(event) = envelope.pointer("/payload/event").cloned() {
-                            on_event(event);
                         }
                     }
                     Some(other) => tracing::debug!(ty = other, "ignored slack envelope"),
