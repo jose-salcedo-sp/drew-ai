@@ -13,3 +13,11 @@ eval-misses = [
     "--concurrency", "2",
     "--question", "daas-q06,daas-q09,daas-q24,daas-q30,daas-q44,daas-q45,daas-q50,daas-q51",
 ]
+# Retrieval alone (embedder and database, no System One or LLM) on every DaaS question, each compared against
+# that run. Seconds instead of an hour; the gate before `eval-misses` and the full golden set.
+eval-retrieval = [
+    "run", "--quiet", "--", "eval", "retrieval",
+    "--golden", "eval/golden/daas.jsonl",
+    "--baseline", "eval/results/daas-2026-10-21-v4.json",
+    "--out", "eval/results/retrieval.json",
+]

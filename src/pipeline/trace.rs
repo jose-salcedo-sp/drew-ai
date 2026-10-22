@@ -105,6 +105,10 @@ pub struct RankedChunk {
     /// System One's probability that the chunk helps answer the question, when `Rerank` judged it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probability: Option<Probability>,
+    /// Set when retrieval added the chunk as context next to a match rather than ranking it: the id of that match.
+    /// Records written before it existed list every chunk as a match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_for: Option<ChunkId>,
 }
 
 /// What `Classify` asked for and got.
@@ -119,7 +123,7 @@ pub struct ClassifyRecord {
     pub fallback_from: Option<CategoryKind>,
 }
 
-/// Recall@50 is computed from `chunks`.
+/// Recall@50 is computed from the matches in `chunks`; context chunks neither count nor take a place.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RetrieveRecord {
     /// Every retrieved chunk, best first.

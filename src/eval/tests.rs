@@ -46,6 +46,7 @@ fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
             chunk: chunk(id),
             score: Relevance(1.0 - rank as f32 / 100.0),
             probability: None,
+            context_for: None,
         })
         .collect()
 }
@@ -496,6 +497,68 @@ async fn recall_and_hit_only_count_the_top_k() {
         metric(0.0, 1),
     );
     assert_metric(results.metrics.overall.rerank_hit_at_5, metric(0.0, 1));
+}
+
+#[test]
+fn recall_counts_matches_only() {
+    let q = golden("q", Expected::Open, &["target", "neighbour"]);
+    // 50 matches, each followed by a context chunk; `target` is the 50th match at position 99, and the relevant
+    // `neighbour` is only ever context.
+    let mut chunks = Vec::new();
+    for i in 0..metrics::RECALL_K {
+        let id = if i == metrics::RECALL_K - 1 {
+            "target".to_owned()
+        } else {
+            format!("m{i}")
+        };
+        let mut pair = ranked(&[&id, if i == 0 { "neighbour" } else { "ctx" }]);
+        pair[1].context_for = Some(ChunkId(id.clone()));
+        chunks.extend(pair);
+    }
+    let record = RetrieveRecord { chunks };
+
+    assert_eq!(
+        metrics::recall_at(metrics::RECALL_K, &q.relevant_chunks, &record),
+        Some(0.5)
+    );
+    assert_eq!(
+        metrics::recall_at(retrieval::SHORT_RECALL_K, &q.relevant_chunks, &record),
+        Some(0.0)
+    );
+    let run = EvalRun::new(
+        q.clone(),
+        report(
+            &q,
+            Some(CategoryKind::Open),
+            answered(None, &[]),
+            vec![entry(
+                "retrieve",
+                passed(None),
+                Some(TraceRecord::Retrieve(record)),
+            )],
+        ),
+    );
+    assert_eq!(run.scores.recall_at_50, Some(0.5));
+}
+
+#[test]
+fn results_written_before_context_for_still_parse() {
+    let old = r#"{"chunk": {"id": "markdown:a.md#x", "version": "v1"}, "score": 0.5}"#;
+    let chunk: RankedChunk = serde_json::from_str(old).unwrap();
+    assert_eq!(chunk.context_for, None);
+    assert_eq!(serde_json::to_string(&chunk).unwrap(), old.replace(' ', ""));
+
+    let v4 = include_str!("../../eval/results/daas-2026-10-21-v4.json");
+    let results: Results = serde_json::from_str(v4).unwrap();
+    assert_eq!(results.runs.len(), 58);
+    let baseline = retrieval::BaselineRecords::parse(v4).unwrap();
+    for run in &results.runs {
+        assert!(baseline.contains(&run.golden.id));
+        assert_eq!(
+            baseline.record(&run.golden.id),
+            metrics::retrieve_record(&run.report)
+        );
+    }
 }
 
 #[test]
@@ -1061,6 +1124,133 @@ fn a_candidate_round_trips_and_pastes_into_the_config() {
     .unwrap();
     assert_eq!(config.thresholds, candidates[0].thresholds);
     assert_eq!(config.per_category, candidates[0].per_category);
+}
+
+// ---- retrieval only ----
+
+fn corpus() -> Vec<crate::domain::Chunk> {
+    use crate::pipeline::steps::fixtures::chunk;
+    vec![
+        chunk("roles", "sap", "which SAP role grants AGR_USERS access"),
+        chunk(
+            "sheet",
+            "mitigations",
+            "the mitigation detail sheet stays empty",
+        ),
+        chunk("noise", "other", "unrelated text about lunch"),
+    ]
+}
+
+fn retrieval_golden(id: &str, question: &str, relevant: &crate::domain::Chunk) -> GoldenQuestion {
+    GoldenQuestion {
+        id: id.into(),
+        synthetic: true,
+        question: Question::new(question),
+        expected: Expected::Open,
+        relevant_chunks: vec![relevant.id.clone()],
+        source_thread: format!("https://example.invalid/{id}"),
+    }
+}
+
+#[tokio::test]
+async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_baseline() {
+    use crate::retrieval::fakes::KeywordRetriever;
+    use retrieval::{Change, RetrievalArgs, RetrievalResults, run_retrieval};
+
+    let chunks = corpus();
+    let golden = [
+        retrieval_golden("roles", "which SAP role grants AGR_USERS", &chunks[0]),
+        retrieval_golden("sheet", "mitigation detail sheet empty", &chunks[1]),
+    ];
+    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    fs::create_dir_all(&dir).unwrap();
+    let golden_path = dir.join("golden.jsonl");
+    let lines: Vec<String> = golden
+        .iter()
+        .map(|g| serde_json::to_string(g).unwrap())
+        .collect();
+    fs::write(&golden_path, lines.join("\n")).unwrap();
+    let args = |out: &str, baseline: Option<PathBuf>| RetrievalArgs {
+        golden: golden_path.clone(),
+        out: Some(dir.join(out)),
+        baseline,
+        concurrency: 2,
+        questions: vec![],
+    };
+    let retriever = |chunks: Vec<crate::domain::Chunk>| Arc::new(KeywordRetriever { chunks });
+
+    // A full `eval run` baseline whose retrieval missed `roles` and found `sheet`.
+    let full = Results::new(
+        golden
+            .iter()
+            .map(|g| {
+                let ids: Vec<&str> = match g.id.as_str() {
+                    "roles" => vec!["elsewhere"],
+                    _ => vec![g.relevant_chunks[0].0.as_str()],
+                };
+                let report = report(g, None, answered(None, &[]), vec![retrieve(&ids)]);
+                EvalRun::new(g.clone(), report)
+            })
+            .collect(),
+    );
+    write_json(&dir.join("full.json"), &full).unwrap();
+
+    run_retrieval(
+        retriever(chunks.clone()),
+        args("first.json", Some(dir.join("full.json"))),
+        None,
+    )
+    .await
+    .unwrap();
+    let first: RetrievalResults = read_json(&dir.join("first.json")).unwrap();
+    assert_eq!(first.runs.len(), 2);
+    assert_eq!(first.runs[0].scores.recall_at_10, Some(1.0));
+    assert_eq!(first.runs[1].scores.recall_at_50, Some(1.0));
+    assert_eq!(first.metrics.overall.recall_at_50.value, Some(1.0));
+    let comparison = first.baseline.as_ref().unwrap();
+    let changes: Vec<Change> = comparison.questions.iter().map(|q| q.change).collect();
+    assert_eq!(changes, [Change::Gained, Change::Unchanged]);
+    assert_eq!(comparison.metrics.overall.recall_at_50.value, Some(0.5));
+    assert!(
+        first
+            .to_string()
+            .contains("gained 1 [\"roles\"], lost 0 [], unchanged 1")
+    );
+
+    // A retrieval results file is a baseline too; losing `sheet` from the corpus loses its recall and fails.
+    let error = run_retrieval(
+        retriever(vec![chunks[0].clone(), chunks[2].clone()]),
+        args("second.json", Some(dir.join("first.json"))),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("lost recall"), "{error}");
+    let second: RetrievalResults = read_json(&dir.join("second.json")).unwrap();
+    let changes: Vec<Change> = second
+        .baseline
+        .unwrap()
+        .questions
+        .iter()
+        .map(|q| q.change)
+        .collect();
+    assert_eq!(changes, [Change::Unchanged, Change::Lost]);
+
+    // A selection must be in the baseline; this one is.
+    run_retrieval(
+        retriever(chunks),
+        RetrievalArgs {
+            questions: vec!["sheet".into()],
+            ..args("third.json", Some(dir.join("first.json")))
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let third: RetrievalResults = read_json(&dir.join("third.json")).unwrap();
+    assert_eq!(third.runs.len(), 1);
+
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

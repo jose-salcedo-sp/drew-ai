@@ -3,11 +3,13 @@
 //!
 //! `drew eval run` answers every [`golden`] question through an [`Answerer`], scores each run from its trace
 //! ([`metrics`]), and gates against a baseline. `drew eval tune` re-applies candidate thresholds to a results file's
-//! recorded scores without calling any model ([`tune`]). Eval reads runs; it never writes the database.
+//! recorded scores without calling any model ([`tune`]). `drew eval retrieval` runs only `Retrieve` and reports
+//! recall ([`retrieval`]). Eval reads runs; it never writes the database.
 
 pub mod golden;
 pub mod metrics;
 pub mod progress;
+pub mod retrieval;
 pub mod tune;
 
 use std::{
@@ -21,35 +23,57 @@ use std::{
 use chrono::Utc;
 
 use crate::{
+    config::ConfigArgs,
+    llm::{self, bedrock_embed::EmbedArgs},
     pipeline::{
         answerer::{PipelineAnswerer, PipelineArgs},
         report::Answerer,
     },
+    retrieval::hybrid::HybridRetriever,
     store::{self, DbArgs},
 };
 
 use self::{
     golden::GoldenQuestion,
     metrics::{Baseline, Results, RunSetup},
+    retrieval::{RetrievalArgs, RetrievalSetup, run_retrieval},
     tune::Candidate,
 };
 
 /// `drew eval` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// `run` or `tune`.
+    /// `run`, `retrieval` or `tune`.
     #[command(subcommand)]
     pub command: Command,
 }
 
 /// The `drew eval` subcommands.
 #[derive(Debug, clap::Subcommand)]
-#[expect(clippy::large_enum_variant, reason = "parsed once at startup")]
 pub enum Command {
     /// Answer every golden question and report per-step metrics.
     Run(RunCommand),
+    /// Run only Retrieve on every golden question and report recall, per question against a baseline.
+    Retrieval(RetrievalCommand),
     /// Re-apply candidate thresholds to a results file's recorded scores.
     Tune(TuneArgs),
+}
+
+/// `drew eval retrieval` options.
+#[derive(Debug, clap::Args)]
+pub struct RetrievalCommand {
+    /// Inputs, outputs and selection.
+    #[command(flatten)]
+    pub files: RetrievalArgs,
+    /// Database connection.
+    #[command(flatten)]
+    pub db: DbArgs,
+    /// The tunables file; only `retrieval` is used.
+    #[command(flatten)]
+    pub config: ConfigArgs,
+    /// The query embedder; must match the corpus's model.
+    #[command(flatten)]
+    pub embed: EmbedArgs,
 }
 
 /// `drew eval run` options.
@@ -121,6 +145,21 @@ pub async fn run(args: Args) -> eros::Result<()> {
             };
             run_golden(Arc::new(answerer), args.files, Some(setup)).await
         }
+        Command::Retrieval(args) => {
+            let pool = store::connect(&args.db).await?;
+            let config = args.config.load()?;
+            let embedder = llm::embedder(&args.embed).await?;
+            let setup = RetrievalSetup {
+                started_at: Utc::now(),
+                finished_at: None,
+                golden: args.files.golden.display().to_string(),
+                git: git_describe(),
+                embedding: embedder.model(),
+                retrieval: config.retrieval.clone(),
+            };
+            let retriever = HybridRetriever::new(pool, embedder, config.retrieval);
+            run_retrieval(Arc::new(retriever), args.files, Some(setup)).await
+        }
         Command::Tune(args) => run_tune(&args),
     }
 }
@@ -146,7 +185,12 @@ pub async fn run_golden(
     }
 
     if let Some(setup) = &setup {
-        print_setup(setup);
+        print_setup(&serde_json::json!({
+            "golden": setup.golden,
+            "git": setup.git,
+            "models": setup.models,
+            "config": setup.config,
+        }));
     }
     let bar = progress::Bar::new(golden.len(), args.concurrency);
     let mut results = metrics::evaluate(answerer.as_ref(), golden, args.concurrency, &bar).await;
@@ -192,14 +236,8 @@ pub fn run_tune(args: &TuneArgs) -> eros::Result<()> {
 }
 
 /// Through `jq -C` when it is installed, so the config reads like any other JSON in the terminal.
-fn print_setup(setup: &RunSetup) {
-    let json = serde_json::json!({
-        "golden": setup.golden,
-        "git": setup.git,
-        "models": setup.models,
-        "config": setup.config,
-    });
-    let pretty = serde_json::to_string_pretty(&json)
+fn print_setup(setup: &serde_json::Value) {
+    let pretty = serde_json::to_string_pretty(setup)
         .expect("the setup is plain data, which always serializes");
     println!("{}", console::style("    Setup").green().bold());
     let colour = if console::colors_enabled() {
