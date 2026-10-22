@@ -17,10 +17,12 @@ use super::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const EMBED_BATCH: usize = 64;
-/// Bytes per token in a batch's token estimate. Subword tokenizers such as bge-m3's average about 4 bytes per token
+/// Bytes per token in a text's token estimate. Subword tokenizers such as bge-m3's average about 4 bytes per token
 /// on English prose and markdown, and CJK text is 3 bytes a character in UTF-8, so dividing by 3 overestimates the
-/// count and a packed batch stays under the budget. Text dense in digits or symbols can run nearer 1 byte a token,
-/// which is why the budget is set below the provider's limit.
+/// count. Text dense in digits or symbols can run nearer 1 byte a token, which is why the budget is set below the
+/// provider's limit. A batch counts as its text count times its longest text's estimate: Workers AI pads every input
+/// to the longest, so 35 sections whose longest is about 2,916 tokens failed with `Max context reached 102060 tokens
+/// but model supports only 60000` although they summed to about 10,000.
 const BYTES_PER_TOKEN: usize = 3;
 /// How much of an oversized text an error quotes; an ingested text starts with its document title and heading.
 const TEXT_PREVIEW_BYTES: usize = 120;
@@ -259,8 +261,10 @@ impl OpenAiEmbedder {
         Self { key, ..self }
     }
 
-    /// Packs each request's texts under `max_batch_tokens` estimated tokens, for a server whose context limit
-    /// spans all of a request's inputs (Workers AI: 60,000). `None`: batches of 64 whatever their size.
+    /// Packs each request under `max_batch_tokens` estimated tokens, for a server whose context limit spans all of
+    /// a request's inputs (Workers AI: 60,000). A request counts as its text count times its longest text's
+    /// estimate at 3 bytes a token, since Workers AI pads every input to the longest. `None`: batches of 64
+    /// whatever their size.
     pub fn with_max_batch_tokens(self, max_batch_tokens: Option<NonZeroUsize>) -> Self {
         Self {
             max_batch_tokens,
@@ -274,8 +278,8 @@ fn estimated_tokens(text: &str) -> usize {
     text.len().div_ceil(BYTES_PER_TOKEN)
 }
 
-/// `texts` cut, in order, into runs of at most [`EMBED_BATCH`] and, with a budget, at most `max_tokens` estimated
-/// tokens.
+/// `texts` cut, in order, into runs of at most [`EMBED_BATCH`] and, with a budget, whose text count times longest
+/// text's estimate is at most `max_tokens`.
 ///
 /// # Errors
 ///
@@ -285,7 +289,7 @@ fn batches(texts: &[String], max_tokens: Option<NonZeroUsize>) -> eros::Result<V
         return Ok(texts.chunks(EMBED_BATCH).collect());
     };
     let mut batches = Vec::new();
-    let (mut start, mut tokens) = (0, 0);
+    let (mut start, mut longest) = (0, 0);
     for (index, text) in texts.iter().enumerate() {
         let estimate = estimated_tokens(text);
         ensure!(
@@ -296,11 +300,12 @@ fn batches(texts: &[String], max_tokens: Option<NonZeroUsize>) -> eros::Result<V
             text.len(),
             &text[..text.floor_char_boundary(TEXT_PREVIEW_BYTES)]
         );
-        if index > start && (tokens + estimate > max_tokens || index - start == EMBED_BATCH) {
+        let padded = (index - start + 1) * longest.max(estimate);
+        if index > start && (padded > max_tokens || index - start == EMBED_BATCH) {
             batches.push(&texts[start..index]);
-            (start, tokens) = (index, 0);
+            (start, longest) = (index, 0);
         }
-        tokens += estimate;
+        longest = longest.max(estimate);
     }
     if start < texts.len() {
         batches.push(&texts[start..]);
@@ -531,8 +536,18 @@ mod tests {
             .collect()
     }
 
+    /// A batch's tokens as Workers AI counts them: every text padded to the longest.
+    fn padded(batch: &[String]) -> usize {
+        batch.len()
+            * batch
+                .iter()
+                .map(|text| estimated_tokens(text))
+                .max()
+                .unwrap_or(0)
+    }
+
     #[test]
-    fn a_budget_packs_texts_in_order_under_its_estimate() {
+    fn a_budget_packs_texts_in_order_under_their_padded_estimate() {
         let texts: Vec<String> = ["a", "b", "c", "d", "e", "f"]
             .iter()
             .zip([30, 30, 30, 60, 3, 90])
@@ -541,10 +556,32 @@ mod tests {
         let packed = batches(&texts, NonZeroUsize::new(30)).unwrap();
         assert_eq!(packed.concat(), texts);
         for batch in &packed {
-            let tokens: usize = batch.iter().map(|text| estimated_tokens(text)).sum();
-            assert!(tokens <= 30, "{batch:?}");
+            assert!(padded(batch) <= 30, "{batch:?}");
         }
-        assert_eq!(sizes(&texts, 30), [3, 2, 1]);
+        assert_eq!(sizes(&texts, 30), [3, 1, 1, 1]);
+    }
+
+    #[test]
+    fn one_long_section_pads_its_whole_batch() {
+        let mut texts: Vec<String> = (0..35).map(|i| format!("Limits {i}\n\nshort")).collect();
+        texts[17] = "| limit | value |\n".repeat(487);
+        assert!(texts[17].len() >= 8_766);
+        assert!(
+            texts
+                .iter()
+                .map(|text| estimated_tokens(text))
+                .sum::<usize>()
+                < 50_000
+        );
+        assert!(padded(&texts) > 60_000);
+
+        let packed = batches(&texts, NonZeroUsize::new(50_000)).unwrap();
+
+        assert!(packed.len() > 1, "{:?}", sizes(&texts, 50_000));
+        for batch in &packed {
+            assert!(padded(batch) <= 50_000, "{} texts", batch.len());
+        }
+        assert_eq!(packed.concat(), texts);
     }
 
     #[test]

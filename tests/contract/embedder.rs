@@ -219,12 +219,51 @@ mod openai {
         let sent = sent_inputs(&server.received_requests().await.unwrap());
         assert!(sent.len() > 1, "{sent:?}");
         for batch in &sent {
-            let estimate: usize = batch.iter().map(|text| text.len().div_ceil(3)).sum();
-            assert!(estimate <= BUDGET, "{batch:?}");
+            assert!(padded(batch) <= BUDGET, "{batch:?}");
         }
         assert_eq!(sent.concat(), texts);
         let expected: Vec<_> = texts.iter().map(|text| vector_of(text)).collect();
         assert_eq!(vectors, expected);
+    }
+
+    /// A request's estimated tokens as Workers AI counts them: every text padded to the longest, at 3 bytes a token.
+    fn padded(batch: &[String]) -> usize {
+        batch.len()
+            * batch
+                .iter()
+                .map(|text| text.len().div_ceil(3))
+                .max()
+                .unwrap_or(0)
+    }
+
+    /// `canon/LIMITS.md`'s shape: 35 sections, one of about 8,770 bytes. Sent as one request they failed with `Max
+    /// context reached 102060 tokens but model supports only 60000` (35 x 2,916), though they sum to far less.
+    #[tokio::test]
+    async fn one_long_section_among_many_short_ones_splits_the_request() {
+        let server = server(embeddings).await;
+        let mut texts: Vec<String> = (0..35)
+            .map(|i| format!("LIMITS\nLimit {i}\n\nOne short rule."))
+            .collect();
+        texts[20] = format!(
+            "LIMITS\nRate limits\n\n{}",
+            "| api | 1,200/min |\n".repeat(436)
+        );
+        assert!(texts[20].len() > 8_700);
+        assert!(padded(&texts) > 60_000);
+
+        let vectors = embedder(&server)
+            .with_max_batch_tokens(NonZeroUsize::new(50_000))
+            .embed(&texts, EmbedPurpose::Document)
+            .await
+            .unwrap();
+
+        let sent = sent_inputs(&server.received_requests().await.unwrap());
+        assert!(sent.len() > 1, "{} requests", sent.len());
+        for batch in &sent {
+            assert!(padded(batch) <= 50_000, "{} texts", batch.len());
+        }
+        assert_eq!(sent.concat(), texts);
+        assert_eq!(vectors.len(), texts.len());
     }
 
     #[tokio::test]
