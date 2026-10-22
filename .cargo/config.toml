@@ -4,11 +4,11 @@ DATABASE_URL = "postgres://drew:drew@localhost:5433/drew"
 
 [alias]
 # The DaaS questions whose relevant chunks retrieval missed at 4ebe407, compared on the same questions against
-# that run. Retrieval changes are checked here before the full golden set.
+# the newest full run (8a9fbfe, with BM25). Retrieval changes are checked here before the full golden set.
 eval-misses = [
     "run", "--quiet", "--", "eval", "run",
     "--golden", "eval/golden/daas.jsonl",
-    "--baseline", "eval/results/daas-2026-10-21-v4.json",
+    "--baseline", "eval/results/daas-2026-10-22-v5.json",
     "--out", "eval/results/retrieval-misses.json",
     "--concurrency", "2",
     "--question", "daas-q06,daas-q09,daas-q24,daas-q30,daas-q44,daas-q45,daas-q50,daas-q51",
