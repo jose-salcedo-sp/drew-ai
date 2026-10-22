@@ -81,7 +81,8 @@ pub struct EvalRun {
 pub struct RunScores {
     /// The run's category equals the golden one; `None` when the run halted before `Classify` recorded one.
     pub classified_correctly: Option<bool>,
-    /// Fraction of the golden relevant chunks among the first [`RECALL_K`] retrieved, in `0..=1`; `None` when the
+    /// Fraction of the golden relevant chunks among the first [`RECALL_K`] retrieved matches (context chunks do not
+    /// count), in `0..=1`; `None` when the
     /// golden question lists none or retrieval left no record.
     pub recall_at_50: Option<f64>,
     /// A golden relevant chunk is among the first [`HIT_K`] reranked matches; `None` as for `recall_at_50`.
@@ -164,10 +165,7 @@ impl RunScores {
             TraceRecord::Classify(record) => Some(record),
             _ => None,
         });
-        let retrieve = last_record(report, |record| match record {
-            TraceRecord::Retrieve(record) => Some(record),
-            _ => None,
-        });
+        let retrieve = retrieve_record(report);
         let rerank = last_record(report, |record| match record {
             TraceRecord::Rerank(record) => Some(record),
             _ => None,
@@ -178,7 +176,7 @@ impl RunScores {
             classified_correctly: classified_correctly(report, classify, expected),
             recall_at_50: retrieve
                 .filter(|_| !relevant.is_empty())
-                .map(|record| recall(&relevant, record)),
+                .map(|record| recall(RECALL_K, &relevant, record)),
             hit_at_5: rerank
                 .filter(|_| !relevant.is_empty())
                 .map(|record| hit(&relevant, record)),
@@ -224,15 +222,31 @@ fn classified_correctly(
     Some(predicted == Some(expected))
 }
 
-fn recall(relevant: &HashSet<&ChunkId>, record: &RetrieveRecord) -> f64 {
+/// Fraction of `relevant` among the first `k` matches `record` lists; context chunks neither count nor take a
+/// place. `None` when `relevant` is empty.
+pub fn recall_at(k: usize, relevant: &[ChunkId], record: &RetrieveRecord) -> Option<f64> {
+    let relevant: HashSet<&ChunkId> = relevant.iter().collect();
+    (!relevant.is_empty()).then(|| recall(k, &relevant, record))
+}
+
+fn recall(k: usize, relevant: &HashSet<&ChunkId>, record: &RetrieveRecord) -> f64 {
     let found: HashSet<&ChunkId> = record
         .chunks
         .iter()
-        .take(RECALL_K)
+        .filter(|ranked| ranked.context_for.is_none())
+        .take(k)
         .map(|ranked| &ranked.chunk.id)
         .filter(|id| relevant.contains(id))
         .collect();
     found.len() as f64 / relevant.len() as f64
+}
+
+/// The last `Retrieve` record in the run's trace.
+pub(super) fn retrieve_record(report: &RunReport) -> Option<&RetrieveRecord> {
+    last_record(report, |record| match record {
+        TraceRecord::Retrieve(record) => Some(record),
+        _ => None,
+    })
 }
 
 fn hit(relevant: &HashSet<&ChunkId>, record: &RerankRecord) -> bool {

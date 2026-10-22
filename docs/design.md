@@ -260,7 +260,8 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 ## 6. Evaluation
 
 - **Golden set**: about 50 questions per category, mined from Drew's Q&A threads, held out of the corpus, verified by Drew.
-- **`drew eval`** reports per step: classification accuracy, retrieval recall@50, rerank hit@5, answer precision, decline rate, citation validity.
+- **`drew eval`** reports per step: classification accuracy, retrieval recall@50, rerank hit@5, answer precision, decline rate, citation validity. Recall counts the matches retrieval ranked; the neighbouring sections it adds as context (`context_for` in the trace) neither count nor take a place.
+- **`drew eval retrieval`** runs only `Retrieve` (embedder and database) and reports recall@10 and recall@50 per question and category, with each question gained, lost or unchanged against a baseline results file. Retrieval changes are gated here first: a lost question exits non-zero.
 - **CI**: runs on every change to prompts, models, chunking, or thresholds; a regression in any metric fails the build.
 - **Threshold tuning**: re-applies candidate thresholds to persisted runs from their recorded scores, without calling any model. Full replay is out of scope for v1. A candidate's `thresholds` and `per_category` have the same shape as those in `config/drew.json`, so a tuned candidate is pasted in as is.
 - **Configuration**: every tunable (retrieval candidates, `classify.min_confidence`, rerank `top_k`, `candidates` and `evidence_rank_penalty`, step thresholds) is in one JSON file, `config/drew.json` or `DREW_CONFIG`. Unknown keys are rejected. `drew eval run` prints it with the models in use and records both, with the git revision, in the results file.

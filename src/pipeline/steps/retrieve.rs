@@ -45,3 +45,52 @@ impl Step for Retrieve {
         Ok(Scored::new(Candidates(hits), record))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::{
+        pipeline::steps::fixtures::chunk,
+        retrieval::{Relevance, Retrieved},
+    };
+
+    struct Fixed(Vec<Retrieved>);
+
+    #[async_trait]
+    impl Retriever for Fixed {
+        async fn retrieve(&self, _query: &str) -> eros::Result<Vec<Retrieved>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_record_marks_context_chunks() {
+        let matched = chunk("match", "page", "the match");
+        let next = chunk("next", "page", "the section after it");
+        let hits = vec![
+            Retrieved {
+                chunk: matched.clone(),
+                score: Relevance(0.5),
+                context_for: None,
+            },
+            Retrieved {
+                chunk: next,
+                score: Relevance(0.4),
+                context_for: Some(matched.id.clone()),
+            },
+        ];
+        let scored = Retrieve::new(Arc::new(Fixed(hits)))
+            .run(&Question::new("q"), Asked)
+            .await
+            .unwrap();
+        let context: Vec<_> = scored
+            .record
+            .chunks
+            .iter()
+            .map(|ranked| ranked.context_for.as_ref())
+            .collect();
+        assert_eq!(context, [None, Some(&matched.id)]);
+    }
+}

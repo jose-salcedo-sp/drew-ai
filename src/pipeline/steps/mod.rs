@@ -52,6 +52,7 @@ fn ranked(hits: &[Retrieved]) -> Vec<RankedChunk> {
             chunk: hit.chunk.reference(),
             score: hit.score,
             probability: None,
+            context_for: hit.context_for.clone(),
         })
         .collect()
 }

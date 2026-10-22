@@ -2,3 +2,5 @@
 .env
 *.visual-check.*
 .DS_Store
+/eval/results/retrieval-misses.json
+/eval/results/retrieval.json
