@@ -81,6 +81,22 @@ pub async fn the_request_reaches_the_model_as_given(
     Ok(())
 }
 
+/// The start of a structured reply, as a model cut off at `max_tokens` leaves it.
+const CUT_OFF: &str = r#"{"claims": ["AGR_USERS maps users to"#;
+
+/// Adapter-only: a fake has no token limit. `chat` replies with [`CUT_OFF`] and its backend's stopped-at-the-limit
+/// reason; the error names the budget and the cause, not the partial JSON a parser would reject.
+async fn a_reply_cut_off_at_max_tokens_is_an_error(chat: &dyn ChatModel, stopped: &str) {
+    let error = chat.complete(request(Some(schema()))).await.unwrap_err();
+
+    let report = format!("{error:#?}");
+    assert!(
+        report.contains(&format!("answer cut off at max_tokens=512 ({stopped})"))
+            && report.contains("on a reasoning model max_tokens also bounds the reasoning"),
+        "{report}"
+    );
+}
+
 macro_rules! chat_model_contract {
     ($make:expr) => {
         #[tokio::test]
@@ -162,7 +178,7 @@ mod openai {
         matchers::{method, path},
     };
 
-    use super::{Adapter, Reply, as_f32, request, schema, sent_to};
+    use super::{Adapter, CUT_OFF, Reply, as_f32, request, schema, sent_to};
 
     /// Workers AI's `@cf/qwen/qwen3.8-27b` as configured in `.env.example`, but with the bare schema form.
     const WORKERS_AI: ChatOptions = ChatOptions {
@@ -226,6 +242,30 @@ mod openai {
 
     chat_model_contract!(openai);
 
+    /// A reasoning model's partial answer, with `length` as the completion's finish reason.
+    fn cut_off() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({ "choices": [{
+            "message": { "role": "assistant", "reasoning": "The user wants JSON.", "content": CUT_OFF },
+            "finish_reason": "length",
+        }] }))
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_at_max_tokens_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(cut_off())
+            .mount(&server)
+            .await;
+
+        crate::chat_model::a_reply_cut_off_at_max_tokens_is_an_error(
+            &chat(&server, None, WORKERS_AI),
+            "finish_reason length",
+        )
+        .await;
+    }
+
     mod workers_ai {
         use drew::llm::workers_ai::WorkersAiChat;
         use wiremock::Respond;
@@ -281,6 +321,17 @@ mod openai {
         }
 
         chat_model_contract!(workers_ai);
+
+        #[tokio::test]
+        async fn a_reply_cut_off_at_max_tokens_is_an_error() {
+            let server = responding(cut_off()).await;
+
+            crate::chat_model::a_reply_cut_off_at_max_tokens_is_an_error(
+                &qwen(&server, "cf-token", ENV_EXAMPLE),
+                "finish_reason length",
+            )
+            .await;
+        }
 
         #[tokio::test]
         async fn the_settings_reach_the_accounts_route_with_the_token() {
@@ -518,6 +569,19 @@ mod bedrock {
     }
 
     chat_model_contract!(bedrock);
+
+    #[tokio::test]
+    async fn a_reply_cut_off_at_max_tokens_is_an_error() {
+        let mut reply = converse(Reply::Text(super::CUT_OFF.into()));
+        reply["stopReason"] = json!("max_tokens");
+        let server = server(ResponseTemplate::new(200).set_body_json(reply)).await;
+
+        crate::chat_model::a_reply_cut_off_at_max_tokens_is_an_error(
+            &BedrockChat::new(crate::bedrock::client(&server), CLAUDE),
+            "stop reason max_tokens",
+        )
+        .await;
+    }
 
     #[tokio::test]
     async fn a_rejected_call_names_the_model_and_the_reason() {

@@ -139,7 +139,8 @@ pub trait ChatModel: Send + Sync {
 
     /// # Errors
     ///
-    /// When the backend fails, times out, or returns no text.
+    /// When the backend fails, times out, or returns no text, or the reply stopped at `max_tokens`, even with
+    /// partial text.
     async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse>;
 }
 

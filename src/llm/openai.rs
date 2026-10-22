@@ -187,16 +187,21 @@ pub(crate) fn chat_body(model: &str, request: &ChatRequest, options: ChatOptions
 ///
 /// # Errors
 ///
-/// When the response has no `choices[0].message.content` string, as when a reasoning model spends all of
-/// `max_tokens` reasoning (`finish_reason` `length`).
+/// When the completion stopped at `max_tokens` (`finish_reason` `length`), even with partial content, or when the
+/// response has no `choices[0].message.content` string.
 #[eros::context("reading the chat completion's answer")]
-pub(crate) fn chat_text(response: &Value) -> eros::Result<String> {
+pub(crate) fn chat_text(response: &Value, max_tokens: u32) -> eros::Result<String> {
     let choice = &response["choices"][0];
+    let finish = choice["finish_reason"].as_str();
+    ensure!(
+        finish != Some("length"),
+        "answer cut off at max_tokens={max_tokens} (finish_reason length); on a reasoning model max_tokens also \
+         bounds the reasoning"
+    );
     let Some(content) = choice["message"]["content"].as_str() else {
-        let finish = choice["finish_reason"].as_str().unwrap_or("absent");
         bail!(
-            "response has no choices[0].message.content (finish_reason {finish}); on a reasoning model \
-             max_tokens also bounds the reasoning, so `length` means it ran out before answering"
+            "response has no choices[0].message.content (finish_reason {})",
+            finish.unwrap_or("absent")
         );
     };
     let answer = match content.rsplit_once("</think>") {
@@ -224,7 +229,7 @@ impl ChatModel for OpenAiChat {
         )
         .await?;
         Ok(ChatResponse {
-            text: chat_text(&response)?,
+            text: chat_text(&response, request.max_tokens)?,
             mean_logprob: None,
         })
     }
@@ -490,32 +495,48 @@ mod tests {
 
     #[test]
     fn reasoning_never_reaches_the_answer() {
-        let response =
-            |content: &str| json!({ "choices": [{ "message": { "content": content } }] });
+        let response = |content: &str| json!({ "choices": [{ "message": { "content": content }, "finish_reason": "stop" }] });
+        let text = |response: &Value| chat_text(response, 512).unwrap();
         assert_eq!(
-            chat_text(&response("<think>\nhmm\n</think>\n{\"claims\": []}")).unwrap(),
+            text(&response("<think>\nhmm\n</think>\n{\"claims\": []}")),
             "{\"claims\": []}"
         );
         assert_eq!(
-            chat_text(&response("the template opened it\n</think>\n{\"a\": 1}")).unwrap(),
+            text(&response("the template opened it\n</think>\n{\"a\": 1}")),
             "{\"a\": 1}"
         );
-        assert_eq!(chat_text(&response(" {\"a\": 1} ")).unwrap(), "{\"a\": 1}");
-        assert_eq!(chat_text(&response("<think>never closed")).unwrap(), "");
+        assert_eq!(text(&response(" {\"a\": 1} ")), "{\"a\": 1}");
+        assert_eq!(text(&response("<think>never closed")), "");
         let separate = json!({ "choices": [{ "message": {
             "content": "{\"a\": 1}", "reasoning": "hmm", "reasoning_content": "hmm"
         } }] });
-        assert_eq!(chat_text(&separate).unwrap(), "{\"a\": 1}");
+        assert_eq!(text(&separate), "{\"a\": 1}");
     }
 
     #[test]
-    fn reasoning_that_used_up_max_tokens_names_the_cause() {
-        let response = json!({ "choices": [{
-            "message": { "content": null, "reasoning": "hmm" }, "finish_reason": "length"
-        }] });
-        let error = format!("{:#?}", chat_text(&response).unwrap_err());
+    fn a_completion_stopped_at_max_tokens_is_cut_off_with_or_without_content() {
+        for content in [
+            json!(null),
+            json!("{\"claims\": [{\"text\": \"AGR_USERS maps"),
+        ] {
+            let response = json!({ "choices": [{
+                "message": { "content": content, "reasoning": "hmm" }, "finish_reason": "length"
+            }] });
+            let error = format!("{:#?}", chat_text(&response, 2048).unwrap_err());
+            assert!(
+                error.contains("answer cut off at max_tokens=2048 (finish_reason length)")
+                    && error.contains("also bounds the reasoning"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_completion_without_content_names_its_finish_reason() {
+        let response = json!({ "choices": [{ "message": {}, "finish_reason": "content_filter" }] });
+        let error = format!("{:#?}", chat_text(&response, 512).unwrap_err());
         assert!(
-            error.contains("finish_reason length") && error.contains("max_tokens"),
+            error.contains("no choices[0].message.content (finish_reason content_filter)"),
             "{error}"
         );
     }
