@@ -145,6 +145,8 @@ pub struct PipelineConfig {
     pub classify: ClassifyConfig,
     /// Who judges the matches, and how many are kept.
     pub rerank: RerankConfig,
+    /// The "why" LLM's token budget.
+    pub explain: ExplainConfig,
     /// The shape of a `drew eval tune` candidate's `thresholds`.
     pub thresholds: Thresholds,
     /// Overrides `thresholds` for runs classified into that category.
@@ -158,6 +160,67 @@ pub struct ClassifyConfig {
     /// Below this probability, a `boolean`, `choice` or `ranking` classification falls back to `open`.
     pub min_confidence: Option<Probability>,
 }
+
+/// [`PipelineConfig::explain`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExplainConfig {
+    /// Upper bound on the tokens Explain's model generates, reasoning included on a reasoning model.
+    pub max_tokens: MaxTokens,
+}
+
+/// Explain's chat `max_tokens`, in `1..=`[`MaxTokens::MAX`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+pub struct MaxTokens(u32);
+
+impl MaxTokens {
+    /// Enough for Explain's answer on a model that does not reason, such as `qwen3:14b` in Ollama.
+    pub const DEFAULT: Self = Self(2048);
+    /// The largest accepted budget. Above it a value is a typo, and no Explain model answers in more.
+    pub const MAX: u32 = 65_536;
+
+    /// # Errors
+    ///
+    /// When `tokens` is 0 or over [`MaxTokens::MAX`].
+    pub fn new(tokens: u32) -> Result<Self, InvalidMaxTokens> {
+        if (1..=Self::MAX).contains(&tokens) {
+            Ok(Self(tokens))
+        } else {
+            Err(InvalidMaxTokens(tokens))
+        }
+    }
+
+    /// The budget.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for MaxTokens {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<MaxTokens> for u32 {
+    fn from(tokens: MaxTokens) -> Self {
+        tokens.0
+    }
+}
+
+impl TryFrom<u32> for MaxTokens {
+    type Error = InvalidMaxTokens;
+
+    fn try_from(tokens: u32) -> Result<Self, Self::Error> {
+        Self::new(tokens)
+    }
+}
+
+/// A `max_tokens` outside `1..=`[`MaxTokens::MAX`].
+#[derive(Debug, thiserror::Error)]
+#[error("explain.max_tokens must be between 1 and {max}, got {0}", max = MaxTokens::MAX)]
+pub struct InvalidMaxTokens(u32);
 
 /// [`PipelineConfig::rerank`]: `0 < top_k`, and `top_k <= candidates` when System One judges.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -358,8 +421,8 @@ impl PipelineConfig {
     ///
     /// # Errors
     ///
-    /// On invalid JSON, an unknown key, a probability outside `0..=1`, an unthresholded step name, or an
-    /// [`InvalidRerankConfig`].
+    /// On invalid JSON, an unknown key, a probability outside `0..=1`, an unthresholded step name, an
+    /// [`InvalidRerankConfig`], or an [`InvalidMaxTokens`].
     pub fn parse(text: &str) -> eros::Result<Self> {
         Ok(serde_json::from_str(text)?)
     }
@@ -555,6 +618,46 @@ mod tests {
             );
         }
         assert!(PipelineConfig::parse(r#"{"thresholds": {"answer": 1.0}}"#).is_ok());
+    }
+
+    #[test]
+    fn explain_max_tokens_defaults_to_2048_and_is_bounded_on_every_load_path() {
+        assert_eq!(PipelineConfig::default().explain.max_tokens.get(), 2048);
+        let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        assert_eq!(shipped.explain.max_tokens, MaxTokens::DEFAULT);
+        let hosted = PipelineConfig::parse(include_str!("../config/drew-workers-ai.json")).unwrap();
+        assert_eq!(hosted.explain.max_tokens.get(), 8192);
+        assert_eq!(
+            PipelineConfig {
+                explain: ExplainConfig::default(),
+                ..hosted.clone()
+            },
+            shipped,
+            "drew-workers-ai.json differs from drew.json only in explain"
+        );
+        let max = PipelineConfig::parse(r#"{"explain": {"max_tokens": 65536}}"#).unwrap();
+        assert_eq!(max.explain.max_tokens.get(), MaxTokens::MAX);
+
+        for (bad, says) in [
+            (
+                r#"{"explain": {"max_tokens": 0}}"#,
+                "explain.max_tokens must be between 1 and 65536, got 0",
+            ),
+            (
+                r#"{"explain": {"max_tokens": 65537}}"#,
+                "explain.max_tokens must be between 1 and 65536, got 65537",
+            ),
+            (r#"{"explain": {"max_tokens": -1}}"#, "invalid value"),
+            (r#"{"explain": {"max_tokens": 2048.5}}"#, "invalid type"),
+            (r#"{"explain": {"max_token": 2048}}"#, "unknown field"),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(says), "{bad}: {error}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

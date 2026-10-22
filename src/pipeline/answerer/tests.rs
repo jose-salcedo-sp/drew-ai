@@ -309,6 +309,39 @@ async fn prompt_delimits_sources_as_data() {
     assert!(request.user.trim_end().ends_with("</sources>"));
 }
 
+#[tokio::test]
+async fn explain_sends_the_configured_max_tokens() {
+    for (config, max_tokens) in [("{}", 2048), (r#"{"explain": {"max_tokens": 8192}}"#, 8192)] {
+        let chat = Arc::new(ScriptedChat::replying([reply(&json!([]))]));
+
+        answerer(corpus(), &chat)
+            .with_config(PipelineConfig::parse(config).unwrap())
+            .answer(Question::new(QUESTION))
+            .await;
+
+        assert_eq!(chat.requests()[0].max_tokens, max_tokens, "{config}");
+    }
+}
+
+#[tokio::test]
+async fn a_reply_cut_off_at_max_tokens_fails_the_run_rather_than_declining() {
+    let chat = Arc::new(ScriptedChat::new([Err(eros::error!(
+        "answer cut off at max_tokens=2048 (finish_reason length); on a reasoning model max_tokens also bounds \
+         the reasoning"
+    ))]));
+
+    let report = ask(corpus(), &chat).await;
+
+    assert!(
+        matches!(
+            &report.outcome,
+            Outcome::Failed { at, error } if at == "explain" && error.contains("answer cut off at max_tokens=2048")
+        ),
+        "{:?}",
+        report.outcome
+    );
+}
+
 #[test]
 fn excerpt_cuts_long_text_on_a_char_boundary() {
     let text = "é".repeat(EXCERPT_CHARS + 10);

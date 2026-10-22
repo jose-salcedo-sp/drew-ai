@@ -121,13 +121,19 @@ impl PipelineAnswerer {
                 threshold(CategoryKind::Boolean, StepName::Rerank),
                 system_one.clone(),
             ),
-            open: Seq(Explain::new(Arc::clone(&explain)), Verify::new()),
+            open: Seq(
+                Explain::new(Arc::clone(&explain), config.explain.max_tokens),
+                Verify::new(),
+            ),
             boolean: Seq(
                 AnswerStep::new(
                     system_one.clone(),
                     threshold(CategoryKind::Boolean, StepName::Answer),
                 ),
-                Seq(Explain::new(Arc::clone(&explain)), Verify::new()),
+                Seq(
+                    Explain::new(Arc::clone(&explain), config.explain.max_tokens),
+                    Verify::new(),
+                ),
             ),
             config,
             embedding,

@@ -22,6 +22,9 @@
     "judge": "none",
     "evidence_rank_penalty": 10
   },
+  "explain": {
+    "max_tokens": 2048
+  },
   "thresholds": {},
   "per_category": {
     "boolean": {
