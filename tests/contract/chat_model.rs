@@ -152,14 +152,23 @@ mod scripted {
 mod openai {
     use std::sync::Arc;
 
-    use drew::llm::{ChatRequest, openai::OpenAiChat};
+    use drew::llm::{
+        ChatModel, ChatRequest,
+        openai::{ChatOptions, OpenAiChat, ReasoningEffort, SchemaFormat},
+    };
     use serde_json::{Value, json};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
-    use super::{Adapter, Reply, as_f32, sent_to};
+    use super::{Adapter, Reply, as_f32, request, schema, sent_to};
+
+    /// Workers AI's `@cf/qwen/qwen3.8-27b` as configured in `.env.example`, but with the bare schema form.
+    const WORKERS_AI: ChatOptions = ChatOptions {
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        schema_format: SchemaFormat::Bare,
+    };
 
     fn sent(body: &Value) -> ChatRequest {
         ChatRequest {
@@ -167,32 +176,181 @@ mod openai {
             user: body["messages"][1]["content"].as_str().unwrap().into(),
             max_tokens: body["max_tokens"].as_u64().unwrap().try_into().unwrap(),
             temperature: as_f32(&body["temperature"]),
-            json_schema: body
-                .get("response_format")
-                .map(|format| format["json_schema"]["schema"].clone()),
+            json_schema: body.get("response_format").map(|format| {
+                let json_schema = &format["json_schema"];
+                match json_schema.get("schema") {
+                    Some(schema) if json_schema.get("name").is_some() => schema.clone(),
+                    _ => json_schema.clone(),
+                }
+            }),
         }
     }
 
-    async fn openai(reply: Reply) -> Adapter {
-        let content = match reply {
-            Reply::Text(text) => text,
-            Reply::Json(value) => value.to_string(),
-        };
+    async fn server(message: Value) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{ "message": { "role": "assistant", "content": content } }]
-            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "choices": [{ "message": message }] })),
+            )
             .mount(&server)
             .await;
+        server
+    }
+
+    fn content(reply: Reply) -> String {
+        match reply {
+            Reply::Text(text) => text,
+            Reply::Json(value) => value.to_string(),
+        }
+    }
+
+    fn chat(server: &MockServer, key: Option<&str>, options: ChatOptions) -> OpenAiChat {
+        OpenAiChat::new(&format!("{}/v1", server.uri()), "qwen3:14b")
+            .unwrap()
+            .with_key(key.map(|key| key.parse().unwrap()))
+            .with_options(options)
+    }
+
+    async fn openai(reply: Reply) -> Adapter {
+        let server = server(json!({ "role": "assistant", "content": content(reply) })).await;
         Adapter {
-            chat: Arc::new(OpenAiChat::new(format!("{}/v1", server.uri()), "qwen3:14b")),
+            chat: Arc::new(chat(&server, None, ChatOptions::default())),
             sent: sent_to(server, sent),
         }
     }
 
     chat_model_contract!(openai);
+
+    mod workers_ai_shaped {
+        use super::*;
+
+        /// A reasoning model that returns its reasoning in a separate field and also inlines a `<think>` block.
+        async fn workers_ai(reply: Reply) -> Adapter {
+            let server = server(json!({
+                "role": "assistant",
+                "reasoning": "The user wants JSON.",
+                "reasoning_content": "The user wants JSON.",
+                "content": format!("<think>draft</think>{}", content(reply)),
+            }))
+            .await;
+            Adapter {
+                chat: Arc::new(chat(&server, Some("cf-token"), WORKERS_AI)),
+                sent: sent_to(server, sent),
+            }
+        }
+
+        chat_model_contract!(workers_ai);
+    }
+
+    async fn first_body(server: &MockServer) -> (Option<String>, Value) {
+        let requests = server.received_requests().await.unwrap();
+        let authorization = requests[0]
+            .headers
+            .get("authorization")
+            .map(|value| value.to_str().unwrap().to_owned());
+        (authorization, requests[0].body_json().unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_key_is_sent_as_a_bearer_token_only_when_set() {
+        for key in [Some("cf-token"), None] {
+            let server = server(json!({ "content": "ok" })).await;
+
+            chat(&server, key, ChatOptions::default())
+                .complete(request(None))
+                .await
+                .unwrap();
+
+            let (authorization, _) = first_body(&server).await;
+            assert_eq!(authorization, key.map(|key| format!("Bearer {key}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_effort_is_sent_only_when_set() {
+        for effort in [Some(ReasoningEffort::Medium), None] {
+            let server = server(json!({ "content": "ok" })).await;
+            let options = ChatOptions {
+                reasoning_effort: effort,
+                ..ChatOptions::default()
+            };
+
+            chat(&server, None, options)
+                .complete(request(None))
+                .await
+                .unwrap();
+
+            let (_, body) = first_body(&server).await;
+            assert_eq!(
+                body.get("reasoning_effort"),
+                effort.map(|effort| json!(effort.as_str())).as_ref()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn each_schema_format_has_its_wire_shape() {
+        for (format, expected) in [
+            (
+                SchemaFormat::Openai,
+                json!({ "name": "respond", "strict": true, "schema": schema() }),
+            ),
+            (SchemaFormat::Bare, schema()),
+        ] {
+            let server = server(json!({ "content": "{\"claims\": []}" })).await;
+            let options = ChatOptions {
+                schema_format: format,
+                ..ChatOptions::default()
+            };
+
+            chat(&server, None, options)
+                .complete(request(Some(schema())))
+                .await
+                .unwrap();
+
+            let (_, body) = first_body(&server).await;
+            assert_eq!(
+                body["response_format"],
+                json!({ "type": "json_schema", "json_schema": expected })
+            );
+        }
+    }
+
+    #[test]
+    fn the_options_are_part_of_the_model_version() {
+        let server_uri = "http://127.0.0.1:9/v1";
+        let model = |options| {
+            OpenAiChat::new(server_uri, "@cf/qwen/qwen3.8-27b")
+                .unwrap()
+                .with_options(options)
+                .model()
+        };
+        assert_eq!(model(ChatOptions::default()).version, "openai-compatible");
+        assert_eq!(
+            model(WORKERS_AI).version,
+            "openai-compatible;reasoning_effort=medium;schema=bare"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_never_shows_the_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad token"))
+            .mount(&server)
+            .await;
+
+        let error = chat(&server, Some("cf-secret-token"), WORKERS_AI)
+            .complete(request(None))
+            .await
+            .unwrap_err();
+
+        let report = format!("{error:?}");
+        assert!(report.contains("401"), "{report}");
+        assert!(!report.contains("cf-secret-token"), "{report}");
+    }
 }
 
 mod bedrock {

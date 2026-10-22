@@ -23,22 +23,6 @@ const CONCURRENT_CALLS: usize = 8;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Which embedding model to use and where it is served.
-#[derive(Clone, Debug, clap::Args)]
-pub struct EmbedArgs {
-    /// Embedding model. On Bedrock: Titan Text Embeddings v2 or Cohere Embed v3, with region and credentials from the
-    /// default AWS chain. With `--embed-url`: a 1024-dimension model such as `bge-m3`.
-    #[arg(
-        long,
-        env = "DREW_EMBED_MODEL",
-        default_value = "amazon.titan-embed-text-v2:0"
-    )]
-    pub embed_model: String,
-    /// OpenAI-compatible base URL, e.g. Ollama at `http://localhost:11434/v1`. Unset: Bedrock.
-    #[arg(long, env = "DREW_EMBED_URL")]
-    pub embed_url: Option<String>,
-}
-
 /// The Bedrock embedding models whose request and response shapes this adapter knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
@@ -193,7 +177,7 @@ impl BedrockEmbedder {
     /// # Errors
     ///
     /// As [`BedrockEmbedder::new`].
-    pub async fn from_args(args: &EmbedArgs) -> eros::Result<Self> {
+    pub async fn load(model_id: &str) -> eros::Result<Self> {
         let timeouts = TimeoutConfig::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .operation_timeout(OPERATION_TIMEOUT)
@@ -202,7 +186,7 @@ impl BedrockEmbedder {
             .timeout_config(timeouts)
             .load()
             .await;
-        Self::new(Client::new(&config), &args.embed_model)
+        Self::new(Client::new(&config), model_id)
     }
 
     async fn invoke(&self, request: Request) -> eros::Result<Vec<Vec<f32>>> {

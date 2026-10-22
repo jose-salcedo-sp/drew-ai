@@ -1,6 +1,8 @@
 //! System One: decision questions over a text, answered with calibrated probabilities.
 //!
-//! The wire format is TypeSafe's `POST /v1/systemone`, served locally by Kev (github.com/jaredpalmer/kev).
+//! The wire format is TypeSafe's `POST /v1/systemone`, served locally by Kev (github.com/jaredpalmer/kev) and hosted
+//! by system-one.dev. Workers AI serves the same request and answers for its Clef models behind its own route and
+//! envelope; see [`super::workers_ai`].
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -10,22 +12,11 @@ use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 use crate::domain::{NotAProbability, Probability};
 
-use super::ModelRef;
+use super::{ApiKey, ModelRef};
 
-/// Where the System One server is.
-#[derive(Clone, Debug, clap::Args)]
-#[group(id = "system_one")]
-pub struct SystemOneArgs {
-    /// System One server, e.g. a local Kev at `http://127.0.0.1:8009`. Unset: every question is classified `open`.
-    #[arg(long, env = "DREW_SYSTEM_ONE_URL")]
-    pub system_one_url: Option<String>,
-    /// Model name sent with each request.
-    #[arg(long, env = "DREW_SYSTEM_ONE_MODEL", default_value = "kev-latest")]
-    pub system_one_model: String,
-    /// Bearer key, when the server sets `KEV_API_KEY`.
-    #[arg(long, env = "DREW_SYSTEM_ONE_KEY", hide_env_values = true)]
-    pub system_one_key: Option<String>,
-}
+/// The decision timeout of [`HttpSystemOne`].
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One `POST /v1/systemone` call: several questions over one text.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -211,28 +202,41 @@ pub trait SystemOne: Send + Sync {
     async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse>;
 }
 
-/// [`SystemOne`] over HTTP, with a 120 s request timeout.
+/// [`SystemOne`] over `POST {base_url}/v1/systemone`, with a 120 s request timeout.
 pub struct HttpSystemOne {
     client: reqwest::Client,
     url: String,
     model: String,
-    key: Option<String>,
+    key: Option<ApiKey>,
 }
 
 impl HttpSystemOne {
-    /// `None` when no server is configured.
-    pub fn from_args(args: &SystemOneArgs) -> Option<Self> {
-        let base = args.system_one_url.as_deref()?.trim_end_matches('/');
-        Some(Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .expect("a client with only a timeout set always builds"),
-            url: format!("{base}/v1/systemone"),
-            model: args.system_one_model.clone(),
-            key: args.system_one_key.clone(),
+    /// `base_url` is the server root, e.g. `http://127.0.0.1:8009` or `https://system-one.dev`.
+    ///
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
+    pub fn new(
+        base_url: &str,
+        model: impl Into<String>,
+        key: Option<ApiKey>,
+    ) -> eros::Result<Self> {
+        Ok(Self {
+            client: http_client(REQUEST_TIMEOUT)?,
+            url: format!("{}/v1/systemone", base_url.trim_end_matches('/')),
+            model: model.into(),
+            key,
         })
     }
+}
+
+/// A client with [`CONNECT_TIMEOUT`] and the adapter's request timeout.
+#[eros::context("building the System One HTTP client")]
+fn http_client(request_timeout: Duration) -> eros::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(request_timeout)
+        .build()?)
 }
 
 #[async_trait]
@@ -255,7 +259,7 @@ impl HttpSystemOne {
         };
         let mut post = self.client.post(&self.url).json(&request);
         if let Some(key) = &self.key {
-            post = post.bearer_auth(key);
+            post = post.bearer_auth(key.expose());
         }
         let response = post.send().await?;
         let status = response.status();
@@ -323,11 +327,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = HttpSystemOne::from_args(&SystemOneArgs {
-            system_one_url: Some(format!("{}/", server.uri())),
-            system_one_model: "kev-latest".into(),
-            system_one_key: Some("secret".into()),
-        })
+        let client = HttpSystemOne::new(
+            &format!("{}/", server.uri()),
+            "kev-latest",
+            Some("secret".parse().unwrap()),
+        )
         .unwrap();
         let response = client.decide(request()).await.unwrap();
         assert!(matches!(
@@ -400,12 +404,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = HttpSystemOne::from_args(&SystemOneArgs {
-            system_one_url: Some(server.uri()),
-            system_one_model: "kev-latest".into(),
-            system_one_key: None,
-        })
-        .unwrap();
+        let client = HttpSystemOne::new(&server.uri(), "kev-latest", None).unwrap();
 
         let response = client.decide(request()).await.unwrap();
 
@@ -422,15 +421,5 @@ mod tests {
             serde_json::to_string(&options).unwrap(),
             r#"{"z":null,"a":"first"}"#
         );
-    }
-
-    #[test]
-    fn unconfigured_means_none() {
-        let args = SystemOneArgs {
-            system_one_url: None,
-            system_one_model: "kev-latest".into(),
-            system_one_key: None,
-        };
-        assert!(HttpSystemOne::from_args(&args).is_none());
     }
 }

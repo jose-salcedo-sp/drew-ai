@@ -11,7 +11,7 @@ use sqlx::PgPool;
 
 use crate::{
     domain::{Document, SourceKind},
-    llm::{self, Embedder, ModelRef, bedrock_embed::EmbedArgs},
+    llm::{self, Embedder, ModelRef, backend::EmbedArgs},
     store::{
         self, DbArgs,
         chunks::{ChunkStore, Stored},

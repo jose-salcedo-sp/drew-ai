@@ -11,9 +11,8 @@ use crate::{
     domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
         self, ChatModel, ModelRef,
-        bedrock_chat::ChatArgs,
-        bedrock_embed::EmbedArgs,
-        system_one::{HttpSystemOne, SystemOne, SystemOneArgs},
+        backend::{ChatArgs, EmbedArgs, SystemOneArgs},
+        system_one::SystemOne,
     },
     retrieval::{Retrieved, Retriever, hybrid::HybridRetriever},
 };
@@ -184,15 +183,14 @@ impl PipelineAnswerer {
     ///
     /// # Errors
     ///
-    /// When the config does not load or the embedder cannot be built.
+    /// When the config does not load or a model client cannot be built.
     pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> eros::Result<Self> {
         let config = args.config.load()?;
         let embedder = llm::embedder(&args.embed).await?;
         let embedding = Some(embedder.model());
         let retriever = HybridRetriever::new(pool, embedder, config.retrieval.clone());
-        let explain = llm::explain_model(&args.chat).await;
-        let system_one = HttpSystemOne::from_args(&args.system_one)
-            .map(|system_one| Arc::new(system_one) as Arc<dyn SystemOne>);
+        let explain = llm::explain_model(&args.chat).await?;
+        let system_one = llm::system_one_client(&args.system_one)?;
         Ok(Self::build(
             config,
             embedding,

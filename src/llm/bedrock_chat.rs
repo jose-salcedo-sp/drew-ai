@@ -26,18 +26,6 @@ const RESPOND_TOOL: &str = "respond";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Which model `Explain` uses and where it is served.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ChatArgs {
-    /// Model for `Explain`: a Bedrock model or inference profile id, e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
-    /// or with `--explain-url` the server's model name, e.g. `qwen3:14b`.
-    #[arg(long, env = "DREW_EXPLAIN_MODEL")]
-    pub explain_model: String,
-    /// OpenAI-compatible base URL, e.g. Ollama at `http://localhost:11434/v1`. Unset: Bedrock.
-    #[arg(long, env = "DREW_EXPLAIN_URL")]
-    pub explain_url: Option<String>,
-}
-
 /// [`ChatModel`] over the Converse API. A request with a `json_schema` forces a tool call whose input is the reply.
 pub struct BedrockChat {
     client: Client,
@@ -54,7 +42,7 @@ impl BedrockChat {
     }
 
     /// Region and credentials come from the standard AWS environment and profile chain.
-    pub async fn from_args(args: &ChatArgs) -> Self {
+    pub async fn load(model_id: &str) -> Self {
         let timeouts = TimeoutConfig::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .operation_timeout(OPERATION_TIMEOUT)
@@ -63,7 +51,7 @@ impl BedrockChat {
             .timeout_config(timeouts)
             .load()
             .await;
-        Self::new(Client::new(&config), &args.explain_model)
+        Self::new(Client::new(&config), model_id)
     }
 }
 
@@ -212,7 +200,6 @@ fn from_document(document: &Document) -> Value {
 #[cfg(test)]
 mod tests {
     use aws_sdk_bedrockruntime::types::{ConverseMetrics, StopReason, TokenUsage, ToolUseBlock};
-    use clap::CommandFactory;
     use serde_json::json;
 
     use super::*;
@@ -359,27 +346,5 @@ mod tests {
         });
 
         assert_eq!(from_document(&to_document(&value)), value);
-    }
-
-    #[derive(clap::Parser)]
-    struct Cli {
-        #[command(flatten)]
-        chat: ChatArgs,
-    }
-
-    #[test]
-    fn explain_model_is_required_from_env_without_default() {
-        let command = Cli::command();
-        let arg = command
-            .get_arguments()
-            .find(|arg| arg.get_id() == "explain_model")
-            .unwrap();
-
-        assert_eq!(
-            arg.get_env().and_then(|env| env.to_str()),
-            Some("DREW_EXPLAIN_MODEL")
-        );
-        assert!(arg.is_required_set());
-        assert!(arg.get_default_values().is_empty());
     }
 }

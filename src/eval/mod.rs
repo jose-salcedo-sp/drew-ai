@@ -24,7 +24,7 @@ use chrono::Utc;
 
 use crate::{
     config::ConfigArgs,
-    llm::{self, bedrock_embed::EmbedArgs},
+    llm::{self, backend::EmbedArgs},
     pipeline::{
         answerer::{PipelineAnswerer, PipelineArgs},
         report::Answerer,

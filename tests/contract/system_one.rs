@@ -132,7 +132,7 @@ mod scripted {
 mod http {
     use std::sync::Arc;
 
-    use drew::llm::system_one::{DecisionResponse, HttpSystemOne, SystemOne, SystemOneArgs};
+    use drew::llm::system_one::{DecisionResponse, HttpSystemOne, SystemOne};
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -142,12 +142,12 @@ mod http {
     use super::{Adapter, request};
 
     fn client(server: &MockServer, key: Option<&str>) -> HttpSystemOne {
-        HttpSystemOne::from_args(&SystemOneArgs {
-            system_one_url: Some(format!("{}/", server.uri())),
-            system_one_model: "kev-latest".into(),
-            system_one_key: key.map(str::to_owned),
-        })
-        .expect("a URL is set")
+        HttpSystemOne::new(
+            &format!("{}/", server.uri()),
+            "kev-latest",
+            key.map(|key| key.parse().unwrap()),
+        )
+        .unwrap()
     }
 
     async fn responding(response: ResponseTemplate) -> MockServer {
@@ -222,5 +222,162 @@ mod http {
                 .map(|value| value.to_str().unwrap().to_owned());
             assert_eq!(authorization, key.map(|key| format!("Bearer {key}")));
         }
+    }
+}
+
+mod workers_ai {
+    use std::sync::Arc;
+
+    use drew::llm::{
+        system_one::{DecisionResponse, SystemOne},
+        workers_ai::WorkersAiSystemOne,
+    };
+    use serde_json::{Value, json};
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::{Adapter, request};
+
+    const CLEF_FLASH: &str = "@cf/cloudflare/clef-flash";
+    const ROUTE: &str = "/client/v4/accounts/acc-123/ai/run/@cf/cloudflare/clef-flash";
+
+    fn client(server: &MockServer, key: &str) -> WorkersAiSystemOne {
+        WorkersAiSystemOne::new(
+            &format!("{}/client/v4/", server.uri()),
+            "acc-123",
+            CLEF_FLASH,
+            key.parse().unwrap(),
+        )
+        .unwrap()
+    }
+
+    async fn responding(response: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(ROUTE))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// The System One body as the port sees it: the route names the model, and `model` carries only its selector.
+    fn as_port_request(request: &Request) -> Value {
+        let mut body: Value = request.body_json().unwrap();
+        let route_model = request
+            .url
+            .path()
+            .split("/ai/run/")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        assert_eq!(body["model"], json!("clef-flash"));
+        body["model"] = json!(route_model);
+        body
+    }
+
+    async fn clef_flash(reply: DecisionResponse) -> Adapter {
+        let mut result = serde_json::to_value(&reply).unwrap();
+        result["model"] = json!("clef-flash");
+        result["usage"] = json!({ "input_tokens": 40, "output_tokens": 0 });
+        let envelope = json!({ "result": result, "success": true, "errors": [], "messages": [] });
+        let server = Arc::new(responding(ResponseTemplate::new(200).set_body_json(envelope)).await);
+        Adapter {
+            system_one: Arc::new(client(&server, "cf-token")),
+            sent: Box::new(move || {
+                let server = Arc::clone(&server);
+                Box::pin(async move {
+                    server
+                        .received_requests()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(as_port_request)
+                        .collect()
+                })
+            }),
+        }
+    }
+
+    system_one_contract!(clef_flash);
+
+    #[tokio::test]
+    async fn the_token_and_the_selector_are_sent_to_the_models_route() {
+        let server = responding(ResponseTemplate::new(200).set_body_json(json!({
+            "result": { "model": "clef-flash", "answers": {}, "usage": { "input_tokens": 1, "output_tokens": 0 } },
+            "success": true, "errors": [], "messages": []
+        })))
+        .await;
+        let client = client(&server, "cf-token");
+
+        client.decide(request()).await.unwrap();
+
+        let sent = &server.received_requests().await.unwrap()[0];
+        assert_eq!(sent.url.path(), ROUTE);
+        assert_eq!(
+            sent.headers.get("authorization").unwrap(),
+            "Bearer cf-token"
+        );
+        assert_eq!(sent.body_json::<Value>().unwrap()["model"], "clef-flash");
+        assert_eq!(client.model().id, CLEF_FLASH);
+    }
+
+    #[tokio::test]
+    async fn an_error_envelope_names_the_model_and_the_errors_but_not_the_token() {
+        for status in [400, 200] {
+            let server = responding(ResponseTemplate::new(status).set_body_json(json!({
+                "result": null,
+                "success": false,
+                "errors": [{ "code": 5006, "message": "questions: must have at least 1 property" }],
+                "messages": []
+            })))
+            .await;
+
+            let error = client(&server, "cf-secret-token")
+                .decide(request())
+                .await
+                .unwrap_err();
+
+            let report = format!("{error:?}");
+            assert!(
+                report.contains(CLEF_FLASH)
+                    && report.contains(&status.to_string())
+                    && report.contains("5006: questions: must have at least 1 property"),
+                "{report}"
+            );
+            assert!(!report.contains("cf-secret-token"), "{report}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_outside_the_envelope_is_an_error_naming_the_model() {
+        let server =
+            responding(ResponseTemplate::new(502).set_body_string("<html>bad gateway")).await;
+
+        let error = client(&server, "cf-token")
+            .decide(request())
+            .await
+            .unwrap_err();
+
+        let report = format!("{error:#?}");
+        assert!(
+            report.contains(CLEF_FLASH) && report.contains("502") && report.contains("bad gateway"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_model_that_is_not_a_workers_ai_id_is_rejected() {
+        let error = WorkersAiSystemOne::new(
+            "https://api.cloudflare.com/client/v4",
+            "acc-123",
+            "clef-flash",
+            "cf-token".parse().unwrap(),
+        )
+        .err()
+        .unwrap();
+        assert!(format!("{error:#?}").contains(CLEF_FLASH));
     }
 }

@@ -142,7 +142,7 @@ mod openai {
     }
 
     fn embedder(server: &MockServer) -> OpenAiEmbedder {
-        OpenAiEmbedder::new(format!("{}/v1", server.uri()), "bge-m3")
+        OpenAiEmbedder::new(&format!("{}/v1", server.uri()), "bge-m3").unwrap()
     }
 
     async fn openai() -> Adapter {
@@ -154,6 +154,41 @@ mod openai {
     }
 
     embedder_contract!(openai);
+
+    mod workers_ai_shaped {
+        use super::*;
+
+        /// `@cf/baai/bge-m3` on Workers AI's OpenAI-compatible route, with its API token.
+        async fn workers_ai() -> Adapter {
+            let server = server(embeddings).await;
+            Adapter {
+                embedder: Box::new(embedder(&server).with_key(Some("cf-token".parse().unwrap()))),
+                _server: Some(server),
+            }
+        }
+
+        embedder_contract!(workers_ai);
+    }
+
+    #[tokio::test]
+    async fn the_key_is_sent_as_a_bearer_token_only_when_set() {
+        for key in [Some("cf-token"), None] {
+            let server = server(embeddings).await;
+
+            embedder(&server)
+                .with_key(key.map(|key| key.parse().unwrap()))
+                .embed(&["a".into()], EmbedPurpose::Query)
+                .await
+                .unwrap();
+
+            let sent = server.received_requests().await.unwrap();
+            let authorization = sent[0]
+                .headers
+                .get("authorization")
+                .map(|value| value.to_str().unwrap().to_owned());
+            assert_eq!(authorization, key.map(|key| format!("Bearer {key}")));
+        }
+    }
 
     #[tokio::test]
     async fn texts_go_in_batches_of_64() {
