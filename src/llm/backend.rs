@@ -7,11 +7,11 @@
 //! so a new field does not compile until every backend accepts or rejects it. [`embedder`], [`explain_model`] and
 //! [`system_one_client`] map those enums to the port traits, which is all the rest of the crate sees.
 //!
-//! Workers AI's chat and embedding models are `openai-compatible`: its `/ai/v1` routes take the same requests with a
-//! bearer key, and the account id is part of the URL. Its System One is the separate `workers-ai` backend, because
-//! `ai/run` differs from `/v1/systemone` in route, model selector and response envelope.
+//! Every port has a `workers-ai` backend, which takes the Cloudflare account id, the API token and the model id, and
+//! builds the Cloudflare URL itself, so no URL setting reaches it. Its embedder packs requests under the model's
+//! documented request limit, so that limit does not depend on a setting.
 
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{error::Error, num::NonZeroUsize, str::FromStr, sync::Arc};
 
 use reqwest::Url;
 
@@ -24,7 +24,10 @@ use super::{
         SchemaFormat,
     },
     system_one::{DECIDE_PATH, HttpSystemOne, SystemOne},
-    workers_ai::{WorkersAiModel, WorkersAiSystemOne, cloudflare_api, run_path},
+    workers_ai::{
+        AccountId, WorkersAiChat, WorkersAiEmbedModel, WorkersAiEmbedder, WorkersAiModel,
+        WorkersAiSystemOne, cloudflare_api, openai_path, run_path,
+    },
 };
 
 /// The embedding model and the backend that serves it.
@@ -33,19 +36,22 @@ pub struct EmbedArgs {
     /// Which backend serves embeddings.
     #[arg(long, env = "DREW_EMBED_BACKEND", value_enum)]
     pub embed_backend: EmbedBackendKind,
-    /// Embedding model, with 1024 dimensions: on Bedrock Titan Text Embeddings v2 or Cohere Embed v3, otherwise the
-    /// server's name, e.g. `bge-m3` in Ollama or `@cf/baai/bge-m3` on Workers AI.
+    /// Embedding model, with 1024 dimensions: on Bedrock Titan Text Embeddings v2 or Cohere Embed v3, on Workers AI
+    /// `@cf/baai/bge-m3`, otherwise the server's name, e.g. `bge-m3` in Ollama.
     #[arg(long, env = "DREW_EMBED_MODEL")]
     pub embed_model: String,
-    /// `openai-compatible` only: base URL, e.g. `http://localhost:11434/v1`, or
-    /// `https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1`.
+    /// `openai-compatible` only, and required there: base URL, e.g. `http://localhost:11434/v1`.
     #[arg(long, env = "DREW_EMBED_URL")]
     pub embed_url: Option<Url>,
-    /// `openai-compatible` only: bearer key, e.g. a Workers AI API token.
+    /// `workers-ai` only, and required there: the Cloudflare account id.
+    #[arg(long, env = "DREW_EMBED_ACCOUNT_ID")]
+    pub embed_account_id: Option<AccountId>,
+    /// Bearer key: optional on `openai-compatible`; the Workers AI API token, required, on `workers-ai`.
     #[arg(long, env = "DREW_EMBED_KEY", hide_env_values = true)]
     pub embed_key: Option<ApiKey>,
-    /// `openai-compatible` only: the most estimated tokens one request carries across its texts, for a server whose
-    /// limit spans a request (Workers AI's bge-m3: 60,000; use 50000). Unset: 64 texts a request whatever their size.
+    /// `openai-compatible` only: the most estimated tokens one request carries, counted as its text count times its
+    /// longest text's estimate, for a server whose limit spans a request. Unset: 64 texts a request whatever their
+    /// size. `workers-ai` knows its model's limit.
     #[arg(long, env = "DREW_EMBED_MAX_BATCH_TOKENS")]
     pub embed_max_batch_tokens: Option<NonZeroUsize>,
 }
@@ -55,8 +61,11 @@ pub struct EmbedArgs {
 pub enum EmbedBackendKind {
     /// Amazon Bedrock; region and credentials from the default AWS chain.
     Bedrock,
-    /// `POST {url}/embeddings`: Ollama, vLLM, llama.cpp, or Workers AI.
+    /// `POST {url}/embeddings`: Ollama, vLLM, or llama.cpp.
     OpenaiCompatible,
+    /// `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/embeddings`, packed under the model's
+    /// request limit.
+    WorkersAi,
 }
 
 /// The `Explain` LLM and the backend that serves it.
@@ -66,21 +75,23 @@ pub struct ChatArgs {
     #[arg(long, env = "DREW_EXPLAIN_BACKEND", value_enum)]
     pub explain_backend: ChatBackendKind,
     /// Model for `Explain`: a Bedrock model or inference profile id, e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
-    /// or the server's model name, e.g. `qwen3:14b` or `@cf/qwen/qwen3.8-27b`.
+    /// a Workers AI model id, e.g. `@cf/qwen/qwen3.8-27b`, or the server's model name, e.g. `qwen3:14b`.
     #[arg(long, env = "DREW_EXPLAIN_MODEL")]
     pub explain_model: String,
-    /// `openai-compatible` only: base URL, e.g. `http://localhost:11434/v1`, or
-    /// `https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1`.
+    /// `openai-compatible` only, and required there: base URL, e.g. `http://localhost:11434/v1`.
     #[arg(long, env = "DREW_EXPLAIN_URL")]
     pub explain_url: Option<Url>,
-    /// `openai-compatible` only: bearer key, e.g. a Workers AI API token.
+    /// `workers-ai` only, and required there: the Cloudflare account id.
+    #[arg(long, env = "DREW_EXPLAIN_ACCOUNT_ID")]
+    pub explain_account_id: Option<AccountId>,
+    /// Bearer key: optional on `openai-compatible`; the Workers AI API token, required, on `workers-ai`.
     #[arg(long, env = "DREW_EXPLAIN_KEY", hide_env_values = true)]
     pub explain_key: Option<ApiKey>,
-    /// `openai-compatible` only: `reasoning_effort` to send; unset sends none. Use `medium` on Workers AI: `low` with
-    /// a `json_schema` hangs there (cloudflare/workers-sdk#16165).
+    /// `openai-compatible` and `workers-ai`: `reasoning_effort` to send; unset sends none. Use `medium` on Workers
+    /// AI: `low` with a `json_schema` hangs there (cloudflare/workers-sdk#16165).
     #[arg(long, env = "DREW_EXPLAIN_REASONING_EFFORT", value_enum)]
     pub explain_reasoning_effort: Option<ReasoningEffort>,
-    /// `openai-compatible` only: how the response schema is sent. Unset: `openai`.
+    /// `openai-compatible` and `workers-ai`: how the response schema is sent. Unset: `openai`.
     #[arg(long, env = "DREW_EXPLAIN_SCHEMA_FORMAT", value_enum)]
     pub explain_schema_format: Option<SchemaFormat>,
 }
@@ -90,8 +101,10 @@ pub struct ChatArgs {
 pub enum ChatBackendKind {
     /// Amazon Bedrock's Converse API; region and credentials from the default AWS chain.
     Bedrock,
-    /// `POST {url}/chat/completions`: Ollama, vLLM, llama.cpp, or Workers AI.
+    /// `POST {url}/chat/completions`: Ollama, vLLM, or llama.cpp.
     OpenaiCompatible,
+    /// `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions`.
+    WorkersAi,
 }
 
 /// System One and the backend that serves it.
@@ -110,7 +123,7 @@ pub struct SystemOneArgs {
     pub system_one_url: Option<Url>,
     /// `workers-ai` only: the Cloudflare account id.
     #[arg(long, env = "DREW_SYSTEM_ONE_ACCOUNT_ID")]
-    pub system_one_account_id: Option<String>,
+    pub system_one_account_id: Option<AccountId>,
     /// Bearer key: Kev's `KEV_API_KEY` or a system-one.dev key, or the Workers AI API token (required there).
     #[arg(long, env = "DREW_SYSTEM_ONE_KEY", hide_env_values = true)]
     pub system_one_key: Option<ApiKey>,
@@ -198,6 +211,18 @@ impl Selected {
     }
 }
 
+/// `value` of `var`, parsed.
+fn parse<T>(value: &str, var: &'static str) -> Result<T, InvalidBackend>
+where
+    T: FromStr,
+    T::Err: Error + Send + Sync + 'static,
+{
+    value.parse().map_err(|error| InvalidBackend::Unparsable {
+        var,
+        source: Box::new(error),
+    })
+}
+
 /// [`EmbedArgs`], checked.
 pub(crate) enum EmbedBackend {
     Bedrock {
@@ -208,6 +233,11 @@ pub(crate) enum EmbedBackend {
         model: String,
         key: Option<ApiKey>,
         max_batch_tokens: Option<NonZeroUsize>,
+    },
+    WorkersAi {
+        account_id: AccountId,
+        model: WorkersAiEmbedModel,
+        key: ApiKey,
     },
 }
 
@@ -222,10 +252,12 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_backend: _,
                     embed_model,
                     embed_url,
+                    embed_account_id,
                     embed_key,
                     embed_max_batch_tokens,
                 } = args;
                 selected.reject(embed_url.as_ref(), "DREW_EMBED_URL")?;
+                selected.reject(embed_account_id.as_ref(), "DREW_EMBED_ACCOUNT_ID")?;
                 selected.reject(embed_key.as_ref(), "DREW_EMBED_KEY")?;
                 selected.reject(
                     embed_max_batch_tokens.as_ref(),
@@ -240,14 +272,37 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_backend: _,
                     embed_model,
                     embed_url,
+                    embed_account_id,
                     embed_key,
                     embed_max_batch_tokens,
                 } = args;
+                selected.reject(embed_account_id.as_ref(), "DREW_EMBED_ACCOUNT_ID")?;
                 Self::OpenAiCompatible {
                     url: selected.require(embed_url.as_ref(), "DREW_EMBED_URL")?,
                     model: embed_model.clone(),
                     key: embed_key.clone(),
                     max_batch_tokens: *embed_max_batch_tokens,
+                }
+            }
+            EmbedBackendKind::WorkersAi => {
+                let EmbedArgs {
+                    embed_backend: _,
+                    embed_model,
+                    embed_url,
+                    embed_account_id,
+                    embed_key,
+                    embed_max_batch_tokens,
+                } = args;
+                selected.reject(embed_url.as_ref(), "DREW_EMBED_URL")?;
+                selected.reject(
+                    embed_max_batch_tokens.as_ref(),
+                    "DREW_EMBED_MAX_BATCH_TOKENS",
+                )?;
+                Self::WorkersAi {
+                    account_id: selected
+                        .require(embed_account_id.as_ref(), "DREW_EMBED_ACCOUNT_ID")?,
+                    model: parse(embed_model, "DREW_EMBED_MODEL")?,
+                    key: selected.require(embed_key.as_ref(), "DREW_EMBED_KEY")?,
                 }
             }
         })
@@ -262,7 +317,7 @@ impl EmbedBackend {
                 "embeddings on Bedrock (DREW_EMBED_BACKEND=bedrock): {}",
                 aws_environment().await
             )),
-            Self::OpenAiCompatible { .. } => None,
+            Self::OpenAiCompatible { .. } | Self::WorkersAi { .. } => None,
         }
     }
 
@@ -271,6 +326,10 @@ impl EmbedBackend {
         match self {
             Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/invoke")).await,
             Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, EMBEDDINGS_PATH)),
+            Self::WorkersAi { account_id, .. } => Some(Endpoint::new(
+                &cloudflare_api(),
+                &openai_path(account_id, EMBEDDINGS_PATH),
+            )),
         }
     }
 
@@ -288,6 +347,11 @@ impl EmbedBackend {
                     .with_key(key)
                     .with_max_batch_tokens(max_batch_tokens),
             ),
+            Self::WorkersAi {
+                account_id,
+                model,
+                key,
+            } => Arc::new(WorkersAiEmbedder::new(account_id, model, key)?),
         })
     }
 }
@@ -303,6 +367,12 @@ pub(crate) enum ChatBackend {
         key: Option<ApiKey>,
         options: ChatOptions,
     },
+    WorkersAi {
+        account_id: AccountId,
+        model: WorkersAiModel,
+        key: ApiKey,
+        options: ChatOptions,
+    },
 }
 
 impl TryFrom<&ChatArgs> for ChatBackend {
@@ -316,11 +386,13 @@ impl TryFrom<&ChatArgs> for ChatBackend {
                     explain_backend: _,
                     explain_model,
                     explain_url,
+                    explain_account_id,
                     explain_key,
                     explain_reasoning_effort,
                     explain_schema_format,
                 } = args;
                 selected.reject(explain_url.as_ref(), "DREW_EXPLAIN_URL")?;
+                selected.reject(explain_account_id.as_ref(), "DREW_EXPLAIN_ACCOUNT_ID")?;
                 selected.reject(explain_key.as_ref(), "DREW_EXPLAIN_KEY")?;
                 selected.reject(
                     explain_reasoning_effort.as_ref(),
@@ -336,14 +408,38 @@ impl TryFrom<&ChatArgs> for ChatBackend {
                     explain_backend: _,
                     explain_model,
                     explain_url,
+                    explain_account_id,
                     explain_key,
                     explain_reasoning_effort,
                     explain_schema_format,
                 } = args;
+                selected.reject(explain_account_id.as_ref(), "DREW_EXPLAIN_ACCOUNT_ID")?;
                 Self::OpenAiCompatible {
                     url: selected.require(explain_url.as_ref(), "DREW_EXPLAIN_URL")?,
                     model: explain_model.clone(),
                     key: explain_key.clone(),
+                    options: ChatOptions {
+                        reasoning_effort: *explain_reasoning_effort,
+                        schema_format: explain_schema_format.unwrap_or_default(),
+                    },
+                }
+            }
+            ChatBackendKind::WorkersAi => {
+                let ChatArgs {
+                    explain_backend: _,
+                    explain_model,
+                    explain_url,
+                    explain_account_id,
+                    explain_key,
+                    explain_reasoning_effort,
+                    explain_schema_format,
+                } = args;
+                selected.reject(explain_url.as_ref(), "DREW_EXPLAIN_URL")?;
+                Self::WorkersAi {
+                    account_id: selected
+                        .require(explain_account_id.as_ref(), "DREW_EXPLAIN_ACCOUNT_ID")?,
+                    model: parse(explain_model, "DREW_EXPLAIN_MODEL")?,
+                    key: selected.require(explain_key.as_ref(), "DREW_EXPLAIN_KEY")?,
                     options: ChatOptions {
                         reasoning_effort: *explain_reasoning_effort,
                         schema_format: explain_schema_format.unwrap_or_default(),
@@ -362,7 +458,7 @@ impl ChatBackend {
                 "explain on Bedrock (DREW_EXPLAIN_BACKEND=bedrock): {}",
                 aws_environment().await
             )),
-            Self::OpenAiCompatible { .. } => None,
+            Self::OpenAiCompatible { .. } | Self::WorkersAi { .. } => None,
         }
     }
 
@@ -371,6 +467,10 @@ impl ChatBackend {
         match self {
             Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/converse")).await,
             Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, CHAT_PATH)),
+            Self::WorkersAi { account_id, .. } => Some(Endpoint::new(
+                &cloudflare_api(),
+                &openai_path(account_id, CHAT_PATH),
+            )),
         }
     }
 
@@ -388,6 +488,12 @@ impl ChatBackend {
                     .with_key(key)
                     .with_options(options),
             ),
+            Self::WorkersAi {
+                account_id,
+                model,
+                key,
+                options,
+            } => Arc::new(WorkersAiChat::new(account_id, model, key, options)?),
         })
     }
 }
@@ -401,7 +507,7 @@ pub(crate) enum SystemOneBackend {
         key: Option<ApiKey>,
     },
     WorkersAi {
-        account_id: String,
+        account_id: AccountId,
         model: WorkersAiModel,
         key: ApiKey,
     },
@@ -451,15 +557,10 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                     system_one_key,
                 } = args;
                 selected.reject(system_one_url.as_ref(), "DREW_SYSTEM_ONE_URL")?;
-                let model = selected
-                    .require(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?
-                    .parse()
-                    .map_err(|error: crate::llm::workers_ai::NotAWorkersAiModel| {
-                        InvalidBackend::Unparsable {
-                            var: "DREW_SYSTEM_ONE_MODEL",
-                            source: Box::new(error),
-                        }
-                    })?;
+                let model = parse(
+                    &selected.require(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?,
+                    "DREW_SYSTEM_ONE_MODEL",
+                )?;
                 Self::WorkersAi {
                     account_id: selected
                         .require(system_one_account_id.as_ref(), "DREW_SYSTEM_ONE_ACCOUNT_ID")?,
@@ -510,7 +611,7 @@ impl SystemOneBackend {
                 account_id,
                 model,
                 key,
-            } => Some(Arc::new(WorkersAiSystemOne::new(&account_id, model, key)?)),
+            } => Some(Arc::new(WorkersAiSystemOne::new(account_id, model, key)?)),
         })
     }
 }
@@ -818,5 +919,162 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// Embeddings and Explain on Workers AI, plus `extra`.
+    fn try_workers_ai(embed_model: &str, extra: &[&str]) -> Result<Cli, clap::Error> {
+        let base = [
+            "drew",
+            "--embed-backend",
+            "workers-ai",
+            "--embed-model",
+            embed_model,
+            "--embed-account-id",
+            "acc",
+            "--embed-key",
+            "token",
+            "--explain-backend",
+            "workers-ai",
+            "--explain-model",
+            "@cf/qwen/qwen3.8-27b",
+            "--explain-account-id",
+            "acc",
+            "--explain-key",
+            "token",
+            "--explain-reasoning-effort",
+            "medium",
+            "--system-one-backend",
+            "none",
+        ];
+        Cli::try_parse_from(base.iter().chain(extra))
+    }
+
+    #[tokio::test]
+    async fn workers_ai_builds_the_cloudflare_urls_from_the_account_id() {
+        let cli = try_workers_ai("@cf/baai/bge-m3", &[]).unwrap();
+
+        let embed = EmbedBackend::try_from(&cli.embed).unwrap();
+        assert!(matches!(
+            embed,
+            EmbedBackend::WorkersAi {
+                model: WorkersAiEmbedModel::BgeM3,
+                ..
+            }
+        ));
+        assert_eq!(
+            embed.endpoint().await.unwrap().to_string(),
+            "https://api.cloudflare.com/client/v4/accounts/acc/ai/v1/embeddings"
+        );
+        let chat = ChatBackend::try_from(&cli.chat).unwrap();
+        assert_eq!(
+            chat.endpoint().await.unwrap().to_string(),
+            "https://api.cloudflare.com/client/v4/accounts/acc/ai/v1/chat/completions"
+        );
+        assert_eq!(
+            explain_model(&cli.chat).await.unwrap().model().version,
+            "openai-compatible;reasoning_effort=medium"
+        );
+        assert_eq!(
+            embedder(&cli.embed).await.unwrap().model(),
+            crate::llm::ModelRef::new("@cf/baai/bge-m3", "dimensions=1024")
+        );
+    }
+
+    #[test]
+    fn workers_ai_rejects_a_url_and_a_batch_budget_as_unused() {
+        for (extra, message) in [
+            (
+                ["--embed-url", "http://localhost:11434/v1"],
+                "DREW_EMBED_URL is set, but DREW_EMBED_BACKEND=workers-ai does not use it; unset it",
+            ),
+            (
+                ["--embed-max-batch-tokens", "50000"],
+                "DREW_EMBED_MAX_BATCH_TOKENS is set, but DREW_EMBED_BACKEND=workers-ai does not use it; unset it",
+            ),
+        ] {
+            let cli = try_workers_ai("@cf/baai/bge-m3", &extra).unwrap();
+            assert_eq!(
+                EmbedBackend::try_from(&cli.embed)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                message
+            );
+        }
+        let cli = try_workers_ai(
+            "@cf/baai/bge-m3",
+            &["--explain-url", "http://localhost:11434/v1"],
+        )
+        .unwrap();
+        assert_eq!(
+            ChatBackend::try_from(&cli.chat).err().unwrap().to_string(),
+            "DREW_EXPLAIN_URL is set, but DREW_EXPLAIN_BACKEND=workers-ai does not use it; unset it"
+        );
+    }
+
+    #[test]
+    fn workers_ai_names_what_it_lacks_or_cannot_parse() {
+        let mut cli = try_workers_ai("@cf/baai/bge-m3", &[]).unwrap();
+        cli.embed.embed_account_id = None;
+        cli.chat.explain_key = None;
+        assert_eq!(
+            missing(EmbedBackend::try_from(&cli.embed).err().unwrap()),
+            "DREW_EMBED_ACCOUNT_ID"
+        );
+        assert_eq!(
+            missing(ChatBackend::try_from(&cli.chat).err().unwrap()),
+            "DREW_EXPLAIN_KEY"
+        );
+
+        let cli = try_workers_ai("bge-m3", &[]).unwrap();
+        let error = EmbedBackend::try_from(&cli.embed)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.starts_with("DREW_EMBED_MODEL: ")
+                && error.ends_with("supported: @cf/baai/bge-m3"),
+            "{error}"
+        );
+        let mut cli = try_workers_ai("@cf/baai/bge-m3", &[]).unwrap();
+        cli.chat.explain_model = "qwen3:14b".into();
+        assert!(
+            ChatBackend::try_from(&cli.chat)
+                .err()
+                .unwrap()
+                .to_string()
+                .starts_with("DREW_EXPLAIN_MODEL: ")
+        );
+        assert!(try_workers_ai("@cf/baai/bge-m3", &["--embed-account-id", "acc/../x"]).is_err());
+    }
+
+    #[test]
+    fn an_account_id_is_only_for_workers_ai() {
+        let cli = parse(&[
+            "--embed-url",
+            "http://localhost:11434/v1",
+            "--embed-account-id",
+            "acc",
+            "--explain-backend",
+            "bedrock",
+            "--explain-account-id",
+            "acc",
+            "--system-one-backend",
+            "none",
+        ]);
+        assert!(matches!(
+            EmbedBackend::try_from(&cli.embed),
+            Err(InvalidBackend::Unused {
+                var: "DREW_EMBED_ACCOUNT_ID",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ChatBackend::try_from(&cli.chat),
+            Err(InvalidBackend::Unused {
+                var: "DREW_EXPLAIN_ACCOUNT_ID",
+                ..
+            })
+        ));
     }
 }

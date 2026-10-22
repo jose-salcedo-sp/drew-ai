@@ -226,25 +226,117 @@ mod openai {
 
     chat_model_contract!(openai);
 
-    mod workers_ai_shaped {
+    mod workers_ai {
+        use drew::llm::workers_ai::WorkersAiChat;
+        use wiremock::Respond;
+
         use super::*;
+
+        const QWEN: &str = "@cf/qwen/qwen3.8-27b";
+        const ROUTE: &str = "/client/v4/accounts/acc-123/ai/v1/chat/completions";
+        /// `.env.example`'s Explain settings: `medium` effort, OpenAI's schema form.
+        const ENV_EXAMPLE: ChatOptions = ChatOptions {
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            schema_format: SchemaFormat::Openai,
+        };
+
+        async fn responding(response: impl Respond + 'static) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(ROUTE))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            server
+        }
+
+        fn qwen(server: &MockServer, key: &str, options: ChatOptions) -> WorkersAiChat {
+            WorkersAiChat::new(
+                "acc-123".parse().unwrap(),
+                QWEN.parse().unwrap(),
+                key.parse().unwrap(),
+                options,
+            )
+            .unwrap()
+            .with_api_base(&format!("{}/client/v4/", server.uri()).parse().unwrap())
+        }
 
         /// A reasoning model that returns its reasoning in a separate field and also inlines a `<think>` block.
         async fn workers_ai(reply: Reply) -> Adapter {
-            let server = server(json!({
+            let message = json!({
                 "role": "assistant",
                 "reasoning": "The user wants JSON.",
                 "reasoning_content": "The user wants JSON.",
                 "content": format!("<think>draft</think>{}", content(reply)),
-            }))
+            });
+            let server = responding(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "choices": [{ "message": message }] })),
+            )
             .await;
             Adapter {
-                chat: Arc::new(chat(&server, Some("cf-token"), WORKERS_AI)),
+                chat: Arc::new(qwen(&server, "cf-token", ENV_EXAMPLE)),
                 sent: sent_to(server, sent),
             }
         }
 
         chat_model_contract!(workers_ai);
+
+        #[tokio::test]
+        async fn the_settings_reach_the_accounts_route_with_the_token() {
+            let server = responding(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "choices": [{ "message": { "content": "{}" } }] })),
+            )
+            .await;
+            let chat = qwen(&server, "cf-token", WORKERS_AI);
+
+            chat.complete(request(Some(schema()))).await.unwrap();
+
+            let sent = &server.received_requests().await.unwrap()[0];
+            assert_eq!(sent.url.path(), ROUTE);
+            assert_eq!(
+                sent.headers.get("authorization").unwrap(),
+                "Bearer cf-token"
+            );
+            let body: Value = sent.body_json().unwrap();
+            assert_eq!(body["model"], QWEN);
+            assert_eq!(body["reasoning_effort"], "medium");
+            assert_eq!(body["response_format"]["json_schema"], schema());
+            assert_eq!(
+                chat.model(),
+                drew::llm::ModelRef::new(
+                    QWEN,
+                    "openai-compatible;reasoning_effort=medium;schema=bare"
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn an_error_envelope_names_the_model_and_its_errors_but_not_the_token() {
+            for status in [400, 200] {
+                let server = responding(ResponseTemplate::new(status).set_body_json(json!({
+                    "result": null,
+                    "success": false,
+                    "errors": [{ "code": 5007, "message": "No such model @cf/qwen/qwen3.8-27b" }],
+                    "messages": [],
+                })))
+                .await;
+
+                let error = qwen(&server, "cf-secret-token", ENV_EXAMPLE)
+                    .complete(request(None))
+                    .await
+                    .unwrap_err();
+
+                let report = format!("{error:?}");
+                assert!(
+                    report.contains(&format!("{QWEN} failed with {status}"))
+                        && report.contains("5007: No such model"),
+                    "{report}"
+                );
+                assert!(!report.contains("cf-secret-token"), "{report}");
+            }
+        }
     }
 
     async fn first_body(server: &MockServer) -> (Option<String>, Value) {

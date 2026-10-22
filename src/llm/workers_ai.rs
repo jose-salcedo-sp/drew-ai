@@ -1,20 +1,31 @@
-//! [`SystemOne`] on Workers AI: Cloudflare's Clef models, e.g. `@cf/cloudflare/clef-flash`, behind
-//! `POST https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/run/{model}` with a bearer API token.
+//! Workers AI adapters, all under `https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/` with a bearer API
+//! token:
 //!
-//! The body is the System One [`DecisionRequest`], with `model` set to the selector the model page names (`clef`
-//! or `clef-flash`, the id's last segment). Like every Workers AI REST call, the reply is wrapped as
-//! `{"result": ..., "success": ..., "errors": [...], "messages": [...]}`; `result` is the System One answer set.
-//! Workers AI's chat and embedding models speak the OpenAI wire format, so [`super::openai`] serves them.
+//! - [`WorkersAiEmbedder`] and [`WorkersAiChat`] post to the OpenAI-compatible `v1/embeddings` and
+//!   `v1/chat/completions` routes, with the bodies and replies of [`super::openai`]. The embedder packs every request
+//!   under its model's documented request limit, so no setting can leave a request unbounded.
+//! - [`WorkersAiSystemOne`] runs Cloudflare's Clef models, e.g. `@cf/cloudflare/clef-flash`, on `ai/run/{model}`. The
+//!   body is the System One [`DecisionRequest`], with `model` set to the selector the model page names (`clef` or
+//!   `clef-flash`, the id's last segment), and the reply is wrapped as
+//!   `{"result": ..., "success": ..., "errors": [...], "messages": [...]}` with the System One answer set as `result`.
+//!
+//! A failure answered with that envelope is reported by its `errors`; any other body is quoted, with the host that
+//! sent it.
 
-use std::{fmt, str::FromStr, time::Duration};
+use std::{fmt, num::NonZeroUsize, str::FromStr, time::Duration};
 
 use async_trait::async_trait;
 use eros::{Context, bail};
-use reqwest::Url;
-use serde::Deserialize;
+use reqwest::{StatusCode, Url};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
-    ApiKey, ModelRef,
+    ApiKey, ChatModel, ChatRequest, ChatResponse, EmbedPurpose, Embedder, ModelRef,
+    openai::{
+        BatchBudget, CHAT_PATH, ChatOptions, EMBEDDINGS_PATH, batches, chat_body, chat_text,
+        embed_model_ref, embeddings, embeddings_body,
+    },
     system_one::{DecisionRequest, DecisionResponse, SystemOne},
 };
 
@@ -29,6 +40,46 @@ const CLEF_FLASH_CONTEXT_TOKENS: u64 = 24_576;
 const TRUNCATION_MARGIN: u64 = 512;
 /// How much of a body outside the envelope an error quotes.
 const BODY_PREVIEW_BYTES: usize = 200;
+/// bge-m3's documented 60,000-token context, which spans one whole request, counted as its text count times its
+/// longest text: 35 sections whose longest was about 2,916 tokens failed with `Max context reached 102060 tokens but
+/// model supports only 60000`.
+const BGE_M3_REQUEST_TOKENS: usize = 60_000;
+/// Tokens a packed request stays under its model's limit by, on top of the 3-bytes-a-token estimate: text dense in
+/// digits and symbols, such as a table of limits, can tokenize nearer 2 bytes a token.
+const REQUEST_TOKEN_MARGIN: usize = 10_000;
+const BGE_M3_BATCH_TOKENS: NonZeroUsize =
+    NonZeroUsize::new(BGE_M3_REQUEST_TOKENS - REQUEST_TOKEN_MARGIN)
+        .expect("bge-m3's request limit is above the margin");
+
+/// A Cloudflare account id, kept to one URL path segment: ASCII letters, digits, `-` and `_`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountId(String);
+
+/// A value that cannot be a Cloudflare account id.
+#[derive(Debug, thiserror::Error)]
+#[error("expected a Cloudflare account id (ASCII letters, digits, - and _), got {0:?}")]
+pub struct NotAnAccountId(String);
+
+impl FromStr for AccountId {
+    type Err = NotAnAccountId;
+
+    fn from_str(id: &str) -> Result<Self, Self::Err> {
+        let valid = !id.is_empty()
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+        match valid {
+            true => Ok(Self(id.to_owned())),
+            false => Err(NotAnAccountId(id.to_owned())),
+        }
+    }
+}
+
+impl fmt::Display for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A Workers AI model id, `@cf/{vendor}/{name}` (or `@hf/...`), e.g. `@cf/cloudflare/clef-flash`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,12 +90,12 @@ pub struct WorkersAiModel {
 
 impl WorkersAiModel {
     /// The full id, used in the route and recorded as the [`ModelRef`] id.
-    pub fn id(&self) -> &str {
+    fn id(&self) -> &str {
         &self.id
     }
 
-    /// The id's last segment, sent as the request's `model` selector.
-    pub fn name(&self) -> &str {
+    /// The id's last segment, sent as the System One request's `model` selector.
+    fn name(&self) -> &str {
         &self.name
     }
 
@@ -87,46 +138,63 @@ impl FromStr for WorkersAiModel {
     }
 }
 
-/// [`SystemOne`] over Workers AI's `ai/run` route.
-pub struct WorkersAiSystemOne {
-    client: reqwest::Client,
-    api_base: String,
-    account_id: String,
-    model: WorkersAiModel,
-    key: ApiKey,
+/// A Workers AI embedding model with [`super::EMBEDDING_DIM`] dimensions and a documented request limit. The set is
+/// closed: a request limit is what keeps ingest from failing mid-corpus, so a model without one is refused at startup
+/// rather than given a guessed budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkersAiEmbedModel {
+    /// `@cf/baai/bge-m3`: 60,000 tokens a request, with every text padded to the longest.
+    BgeM3,
 }
 
-impl WorkersAiSystemOne {
-    /// Calls the public Cloudflare API; see [`WorkersAiSystemOne::with_api_base`].
-    ///
-    /// # Errors
-    ///
-    /// When the HTTP client cannot be built.
-    pub fn new(account_id: &str, model: WorkersAiModel, key: ApiKey) -> eros::Result<Self> {
-        Ok(Self {
-            client: client()?,
-            api_base: CLOUDFLARE_API.to_owned(),
-            account_id: account_id.to_owned(),
-            model,
-            key,
-        })
-    }
+impl WorkersAiEmbedModel {
+    const ALL: [Self; 1] = [Self::BgeM3];
 
-    /// Another API root in place of `https://api.cloudflare.com/client/v4`, such as a test server. No setting reaches
-    /// it: a URL left over from another backend would send Clef's requests to the wrong server.
-    pub fn with_api_base(self, api_base: &Url) -> Self {
-        Self {
-            api_base: api_base.as_str().trim_end_matches('/').to_owned(),
-            ..self
+    fn id(self) -> &'static str {
+        match self {
+            Self::BgeM3 => "@cf/baai/bge-m3",
         }
     }
 
-    fn route(&self) -> String {
-        format!(
-            "{}/{}",
-            self.api_base,
-            run_path(&self.account_id, &self.model)
-        )
+    /// The padded estimate one request stays under: the model's limit less [`REQUEST_TOKEN_MARGIN`].
+    fn batch_budget(self) -> BatchBudget {
+        match self {
+            Self::BgeM3 => BatchBudget::new(
+                BGE_M3_BATCH_TOKENS,
+                "@cf/baai/bge-m3's 60000-token request limit, less a safety margin",
+            ),
+        }
+    }
+}
+
+impl fmt::Display for WorkersAiEmbedModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// An embedding model whose request limit Drew does not know.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{0:?} is not a Workers AI embedding model with a known request limit; supported: {supported}",
+    supported = supported_embed_models()
+)]
+pub struct UnsupportedEmbedModel(String);
+
+fn supported_embed_models() -> String {
+    WorkersAiEmbedModel::ALL
+        .map(WorkersAiEmbedModel::id)
+        .join(", ")
+}
+
+impl FromStr for WorkersAiEmbedModel {
+    type Err = UnsupportedEmbedModel;
+
+    fn from_str(id: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|model| model.id() == id)
+            .ok_or_else(|| UnsupportedEmbedModel(id.to_owned()))
     }
 }
 
@@ -137,9 +205,14 @@ pub(crate) fn cloudflare_api() -> Url {
         .expect("CLOUDFLARE_API is a valid URL")
 }
 
-/// The model's run route under the API root.
-pub(crate) fn run_path(account_id: &str, model: &WorkersAiModel) -> String {
-    format!("accounts/{account_id}/ai/run/{}", model.id())
+/// The model's `ai/run` route under the API root.
+pub(crate) fn run_path(account: &AccountId, model: &WorkersAiModel) -> String {
+    format!("accounts/{account}/ai/run/{}", model.id())
+}
+
+/// An OpenAI-compatible route, such as [`EMBEDDINGS_PATH`], under the API root.
+pub(crate) fn openai_path(account: &AccountId, path: &str) -> String {
+    format!("accounts/{account}/ai/v1/{path}")
 }
 
 #[eros::context("building the Workers AI HTTP client")]
@@ -148,6 +221,243 @@ fn client() -> eros::Result<reqwest::Client> {
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()?)
+}
+
+/// One account's routes and the token that authorizes them.
+struct Account {
+    client: reqwest::Client,
+    api_base: String,
+    id: AccountId,
+    key: ApiKey,
+}
+
+/// A reply as it came off the wire.
+struct Reply {
+    status: StatusCode,
+    /// Host and port, to name another server that answered in place of Workers AI.
+    host: String,
+    text: String,
+}
+
+impl Reply {
+    fn preview(&self) -> &str {
+        &self.text[..self.text.floor_char_boundary(BODY_PREVIEW_BYTES)]
+    }
+}
+
+impl Account {
+    fn new(id: AccountId, key: ApiKey) -> eros::Result<Self> {
+        Ok(Self {
+            client: client()?,
+            api_base: CLOUDFLARE_API.to_owned(),
+            id,
+            key,
+        })
+    }
+
+    fn with_api_base(self, api_base: &Url) -> Self {
+        Self {
+            api_base: api_base.as_str().trim_end_matches('/').to_owned(),
+            ..self
+        }
+    }
+
+    fn route(&self, path: &str) -> String {
+        format!("{}/{path}", self.api_base)
+    }
+
+    #[eros::context("sending the request and reading the reply")]
+    async fn send<B: Serialize + Sync>(&self, route: &str, body: &B) -> eros::Result<Reply> {
+        let response = self
+            .client
+            .post(route)
+            .bearer_auth(self.key.expose())
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        let url = response.url();
+        let host = format!(
+            "{}{}",
+            url.host_str().unwrap_or_default(),
+            url.port()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default()
+        );
+        let text = response.text().await?;
+        Ok(Reply { status, host, text })
+    }
+
+    /// The OpenAI-shaped reply of an OpenAI-compatible route.
+    #[eros::context("POST {} for {}", self.route(&openai_path(&self.id, path)), model)]
+    async fn post_openai(&self, path: &str, model: &str, body: &Value) -> eros::Result<Value> {
+        let reply = self
+            .send(&self.route(&openai_path(&self.id, path)), body)
+            .await?;
+        let value = serde_json::from_str::<Value>(&reply.text).ok();
+        if let Some(Failure {
+            success: false,
+            errors,
+        }) = value
+            .as_ref()
+            .and_then(|value| Failure::deserialize(value).ok())
+        {
+            bail!(
+                "{model} failed with {}: {}",
+                reply.status,
+                messages(&errors)
+            );
+        }
+        match value {
+            Some(value) if reply.status.is_success() => Ok(value),
+            _ => bail!(
+                "{model} at {} returned {}: {}",
+                reply.host,
+                reply.status,
+                reply.preview()
+            ),
+        }
+    }
+}
+
+/// [`Embedder`] over Workers AI's OpenAI-compatible `embeddings` route, in requests of at most 64 texts whose count
+/// times their longest text's estimated tokens stays a safety margin under the model's request limit. Ignores
+/// [`EmbedPurpose`].
+pub struct WorkersAiEmbedder {
+    account: Account,
+    model: WorkersAiEmbedModel,
+}
+
+impl WorkersAiEmbedder {
+    /// Calls the public Cloudflare API.
+    ///
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
+    pub fn new(account: AccountId, model: WorkersAiEmbedModel, key: ApiKey) -> eros::Result<Self> {
+        Ok(Self {
+            account: Account::new(account, key)?,
+            model,
+        })
+    }
+
+    /// Another API root in place of `https://api.cloudflare.com/client/v4`, such as a test server. No setting reaches
+    /// it: a URL left over from another backend would send the account's token to the wrong server.
+    pub fn with_api_base(self, api_base: &Url) -> Self {
+        Self {
+            account: self.account.with_api_base(api_base),
+            ..self
+        }
+    }
+}
+
+#[async_trait]
+impl Embedder for WorkersAiEmbedder {
+    fn model(&self) -> ModelRef {
+        embed_model_ref(self.model.id())
+    }
+
+    async fn embed(&self, texts: &[String], _purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(texts.len());
+        for batch in batches(texts, Some(self.model.batch_budget()))? {
+            let response = self
+                .account
+                .post_openai(
+                    EMBEDDINGS_PATH,
+                    self.model.id(),
+                    &embeddings_body(self.model.id(), batch),
+                )
+                .await?;
+            vectors.extend(embeddings(&response, batch.len())?);
+        }
+        Ok(vectors)
+    }
+}
+
+/// [`ChatModel`] over Workers AI's OpenAI-compatible `chat/completions` route.
+pub struct WorkersAiChat {
+    account: Account,
+    model: WorkersAiModel,
+    options: ChatOptions,
+}
+
+impl WorkersAiChat {
+    /// Calls the public Cloudflare API.
+    ///
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
+    pub fn new(
+        account: AccountId,
+        model: WorkersAiModel,
+        key: ApiKey,
+        options: ChatOptions,
+    ) -> eros::Result<Self> {
+        Ok(Self {
+            account: Account::new(account, key)?,
+            model,
+            options,
+        })
+    }
+
+    /// See [`WorkersAiEmbedder::with_api_base`].
+    pub fn with_api_base(self, api_base: &Url) -> Self {
+        Self {
+            account: self.account.with_api_base(api_base),
+            ..self
+        }
+    }
+}
+
+#[async_trait]
+impl ChatModel for WorkersAiChat {
+    fn model(&self) -> ModelRef {
+        ModelRef::new(self.model.id(), self.options.version())
+    }
+
+    async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse> {
+        let body = chat_body(self.model.id(), &request, self.options);
+        let response = self
+            .account
+            .post_openai(CHAT_PATH, self.model.id(), &body)
+            .await?;
+        Ok(ChatResponse {
+            text: chat_text(&response)?,
+            mean_logprob: None,
+        })
+    }
+}
+
+/// [`SystemOne`] over Workers AI's `ai/run` route.
+pub struct WorkersAiSystemOne {
+    account: Account,
+    model: WorkersAiModel,
+}
+
+impl WorkersAiSystemOne {
+    /// Calls the public Cloudflare API.
+    ///
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
+    pub fn new(account: AccountId, model: WorkersAiModel, key: ApiKey) -> eros::Result<Self> {
+        Ok(Self {
+            account: Account::new(account, key)?,
+            model,
+        })
+    }
+
+    /// See [`WorkersAiEmbedder::with_api_base`].
+    pub fn with_api_base(self, api_base: &Url) -> Self {
+        Self {
+            account: self.account.with_api_base(api_base),
+            ..self
+        }
+    }
+
+    fn route(&self) -> String {
+        self.account.route(&run_path(&self.account.id, &self.model))
+    }
 }
 
 #[async_trait]
@@ -167,6 +477,14 @@ impl SystemOne for WorkersAiSystemOne {
 struct Envelope {
     #[serde(default)]
     result: Option<RunResult>,
+    success: bool,
+    #[serde(default)]
+    errors: Vec<ApiMessage>,
+}
+
+/// The envelope without its `result`, to recognize a failure on a route whose success is not enveloped.
+#[derive(Deserialize)]
+struct Failure {
     success: bool,
     #[serde(default)]
     errors: Vec<ApiMessage>,
@@ -211,28 +529,14 @@ impl WorkersAiSystemOne {
             model: self.model.name().to_owned(),
             ..request
         };
-        let response = self
-            .client
-            .post(self.route())
-            .bearer_auth(self.key.expose())
-            .json(&request)
-            .send()
-            .await?;
-        let status = response.status();
-        let url = response.url();
-        let host = format!(
-            "{}{}",
-            url.host_str().unwrap_or_default(),
-            url.port()
-                .map(|port| format!(":{port}"))
-                .unwrap_or_default()
-        );
-        let text = response.text().await?;
-        let envelope = serde_json::from_str::<Envelope>(&text).with_context(|| {
+        let reply = self.account.send(&self.route(), &request).await?;
+        let status = reply.status;
+        let envelope = serde_json::from_str::<Envelope>(&reply.text).with_context(|| {
             format!(
-                "{} at {host} returned {status} without the Workers AI envelope: {}",
+                "{} at {} returned {status} without the Workers AI envelope: {}",
                 self.model,
-                &text[..text.floor_char_boundary(BODY_PREVIEW_BYTES)]
+                reply.host,
+                reply.preview()
             )
         })?;
         match envelope {
@@ -284,9 +588,34 @@ mod tests {
     }
 
     #[test]
+    fn an_account_id_is_one_path_segment() {
+        let account: AccountId = "0123abcd-ef_9".parse().unwrap();
+        assert_eq!(account.to_string(), "0123abcd-ef_9");
+        for bad in ["", " ", "acc/../other", "acc?x=1", "acc 1"] {
+            assert!(bad.parse::<AccountId>().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn only_embedding_models_with_a_known_request_limit_are_accepted() {
+        let model: WorkersAiEmbedModel = "@cf/baai/bge-m3".parse().unwrap();
+        assert_eq!(model, WorkersAiEmbedModel::BgeM3);
+        assert_eq!(model.batch_budget().tokens(), 50_000);
+        let error = "@cf/baai/bge-large-en-v1.5"
+            .parse::<WorkersAiEmbedModel>()
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "\"@cf/baai/bge-large-en-v1.5\" is not a Workers AI embedding model with a known request limit; \
+             supported: @cf/baai/bge-m3"
+        );
+    }
+
+    #[test]
     fn the_route_uses_the_public_api_unless_overridden() {
         let client = WorkersAiSystemOne::new(
-            "acc",
+            "acc".parse().unwrap(),
             "@cf/cloudflare/clef-flash".parse().unwrap(),
             "token".parse().unwrap(),
         )

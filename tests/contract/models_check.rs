@@ -63,6 +63,7 @@ fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
             embed_backend: EmbedBackendKind::OpenaiCompatible,
             embed_model: "@cf/baai/bge-m3".into(),
             embed_url: openai_base.clone(),
+            embed_account_id: None,
             embed_key: Some(TOKEN.parse().unwrap()),
             embed_max_batch_tokens: None,
         },
@@ -70,6 +71,7 @@ fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
             explain_backend: ChatBackendKind::OpenaiCompatible,
             explain_model: "@cf/qwen/qwen3.8-27b".into(),
             explain_url: openai_base,
+            explain_account_id: None,
             explain_key: Some(TOKEN.parse().unwrap()),
             explain_reasoning_effort: Some(ReasoningEffort::Medium),
             explain_schema_format: None,
@@ -165,7 +167,7 @@ async fn a_url_left_over_from_kev_fails_workers_ai_before_any_call() {
     let mut args = args(&server, SystemOneBackendKind::SystemOne);
     args.system_one.system_one_backend = SystemOneBackendKind::WorkersAi;
     args.system_one.system_one_model = Some("@cf/cloudflare/clef-flash".into());
-    args.system_one.system_one_account_id = Some("acc-123".into());
+    args.system_one.system_one_account_id = Some("acc-123".parse().unwrap());
 
     let check = check(&args).await;
 
