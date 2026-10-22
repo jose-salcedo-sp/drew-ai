@@ -3,7 +3,9 @@
 //! Full text has two sides, both generated columns on `chunks`: `fts_prose` (English stemming, for questions written
 //! in prose) and `fts_tokens` (exact lowercased `[a-z0-9_]` tokens, for SAP identifiers such as `S_TCODE`, which the
 //! English configuration splits and stems). Prose words are OR-ed; identifier-shaped query tokens must match exactly
-//! and dominate the full-text ranking.
+//! and dominate the full-text ranking. Within the same identifier-match count, chunks rank by BM25 over `fts_prose`,
+//! with document frequencies and the average chunk length from the corpus statistics that `drew ingest` refreshes
+//! (`fts_prose_terms`, `fts_prose_corpus`).
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
@@ -34,6 +36,8 @@ pub struct HybridConfig {
     pub fused_limit: usize,
     /// Expansion stops adding neighbouring sections to a page once it has this many chunks in the result.
     pub max_chunks_per_document: usize,
+    /// Full-text ranking constants.
+    pub bm25: Bm25,
 }
 
 impl Default for HybridConfig {
@@ -44,7 +48,83 @@ impl Default for HybridConfig {
             rrf_k: 60.0,
             fused_limit: 50,
             max_chunks_per_document: 3,
+            bm25: Bm25::default(),
         }
+    }
+}
+
+/// BM25 constants: `k1` (finite, `>= 0`) is how fast repeats of a term stop adding score, and `b` (in `0..=1`) is
+/// how much a chunk longer than average is penalised. Defaults are Lucene's, 1.2 and 0.75.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Bm25Fields", into = "Bm25Fields")]
+pub struct Bm25 {
+    k1: f64,
+    b: f64,
+}
+
+/// Constants rejected by [`Bm25::new`].
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[error("bm25 needs a finite k1 >= 0 and b in 0..=1, got k1 = {k1}, b = {b}")]
+pub struct InvalidBm25 {
+    /// The rejected `k1`.
+    pub k1: f64,
+    /// The rejected `b`.
+    pub b: f64,
+}
+
+impl Bm25 {
+    /// # Errors
+    ///
+    /// [`InvalidBm25`] when `k1` is negative or not finite, or `b` is outside `0..=1`.
+    pub fn new(k1: f64, b: f64) -> Result<Self, InvalidBm25> {
+        if k1.is_finite() && k1 >= 0.0 && (0.0..=1.0).contains(&b) {
+            Ok(Self { k1, b })
+        } else {
+            Err(InvalidBm25 { k1, b })
+        }
+    }
+
+    /// Term-frequency saturation, finite and `>= 0`.
+    pub fn k1(self) -> f64 {
+        self.k1
+    }
+
+    /// Length normalisation, in `0..=1`.
+    pub fn b(self) -> f64 {
+        self.b
+    }
+}
+
+impl Default for Bm25 {
+    fn default() -> Self {
+        Self { k1: 1.2, b: 0.75 }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Bm25Fields {
+    k1: f64,
+    b: f64,
+}
+
+impl Default for Bm25Fields {
+    fn default() -> Self {
+        Bm25::default().into()
+    }
+}
+
+impl From<Bm25> for Bm25Fields {
+    fn from(Bm25 { k1, b }: Bm25) -> Self {
+        Self { k1, b }
+    }
+}
+
+impl TryFrom<Bm25Fields> for Bm25 {
+    type Error = InvalidBm25;
+
+    fn try_from(Bm25Fields { k1, b }: Bm25Fields) -> Result<Self, InvalidBm25> {
+        Self::new(k1, b)
     }
 }
 
@@ -128,12 +208,10 @@ impl HybridRetriever {
         tx: &mut Transaction<'_, Postgres>,
         query: &str,
     ) -> eros::Result<Vec<ChunkId>> {
-        let prose = prose_terms(query);
-        let identifiers = identifier_terms(query);
-        if self.config.full_text_candidates == 0 || (prose.is_empty() && identifiers.is_empty()) {
+        if self.config.full_text_candidates == 0 {
             return Ok(Vec::new());
         }
-        let prose_query = (!prose.is_empty()).then(|| prose.join(" | "));
+        let identifiers = identifier_terms(query);
         // Identifier terms are [a-z0-9_] only, so quoting them cannot break tsquery syntax.
         let identifier_query = (!identifiers.is_empty()).then(|| {
             identifiers
@@ -142,21 +220,56 @@ impl HybridRetriever {
                 .collect::<Vec<_>>()
                 .join(" | ")
         });
+        // The question is tokenized like the chunks (`to_tsvector`), so compound lexemes such as `built-in` or a file
+        // path match. Its lexemes are OR-ed as quoted tsquery operands: quotes double and backslashes escape.
+        // BM25 uses Lucene's idf. A lexeme new since the last stats refresh counts as in no chunk (the highest idf).
+        // With no current chunks at the last refresh, every chunk counts as average length.
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT c.id
-             FROM chunks c,
-                  (SELECT to_tsquery('english', $1) AS prose, $2::tsquery AS tokens) q
+            "WITH terms AS (
+                 SELECT tsvector_to_array(to_tsvector('english', $1)) AS terms
+             ),
+             q AS (
+                 SELECT terms.terms,
+                        (SELECT string_agg(
+                                    '''' || replace(replace(t, '\\', '\\\\'), '''', '''''') || '''', ' | ')
+                         FROM unnest(terms.terms) t)::tsquery AS prose,
+                        $2::tsquery AS tokens
+                 FROM terms
+             ),
+             corpus AS (
+                 SELECT coalesce(max(chunks), 0)::float8 AS chunks, max(avg_length) AS avg_length
+                 FROM fts_prose_corpus
+             )
+             SELECT c.id
+             FROM chunks c CROSS JOIN q CROSS JOIN corpus
+             CROSS JOIN LATERAL (
+                 SELECT coalesce(sum(
+                            ln(1 + (corpus.chunks - coalesce(t.chunks, 0) + 0.5) / (coalesce(t.chunks, 0) + 0.5))
+                            * u.tf * ($5 + 1)
+                            / (u.tf + $5 * (1 - $6 + $6 * u.length
+                                                 / coalesce(nullif(corpus.avg_length, 0), u.length)))
+                        ), 0) AS score
+                 FROM (
+                     SELECT lexeme, coalesce(array_length(positions, 1), 1) AS tf,
+                            sum(coalesce(array_length(positions, 1), 1)) OVER () AS length
+                     FROM unnest(c.fts_prose)
+                 ) u
+                 LEFT JOIN fts_prose_terms t ON t.lexeme = u.lexeme
+                 WHERE u.lexeme = ANY(q.terms)
+             ) bm25
              WHERE c.superseded_at IS NULL
                AND (c.fts_prose @@ q.prose OR c.fts_tokens @@ q.tokens)
              ORDER BY length(c.fts_tokens) - length(ts_delete(c.fts_tokens, $3::text[])) DESC,
-                      coalesce(ts_rank(c.fts_prose, q.prose, 1), 0) DESC,
+                      bm25.score DESC,
                       c.id
              LIMIT $4",
         )
-        .bind(prose_query)
+        .bind(query)
         .bind(identifier_query)
         .bind(&identifiers)
         .bind(i64::try_from(self.config.full_text_candidates)?)
+        .bind(self.config.bm25.k1())
+        .bind(self.config.bm25.b())
         .fetch_all(&mut **tx)
         .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
@@ -380,15 +493,6 @@ impl Expansion {
     }
 }
 
-/// Words for the English side, OR-ed so a long question still matches chunks sharing only some of its words.
-/// Alphanumeric words cannot contain tsquery operators.
-fn prose_terms(query: &str) -> Vec<&str> {
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect()
-}
-
 /// Identifier-shaped query tokens, matched exactly against `chunks.fts_tokens`: tokens over `[A-Za-z0-9_]` (edge
 /// underscores trimmed, as in the migration) that contain a letter and either an underscore or a digit, such as
 /// `S_TCODE`, `AGR_USERS`, or `SU24`. Lowercased, sorted, and deduplicated.
@@ -488,13 +592,5 @@ mod tests {
             ["agr_users", "s_tcode", "su24"]
         );
         assert!(identifier_terms("which table maps users to roles").is_empty());
-    }
-
-    #[test]
-    fn prose_terms_cannot_inject_tsquery_syntax() {
-        assert_eq!(
-            prose_terms("a & b | !c:* 'd' (e)"),
-            ["a", "b", "c", "d", "e"]
-        );
     }
 }

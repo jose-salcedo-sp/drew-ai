@@ -16,6 +16,7 @@ use drew::{
         Relevance, Retrieved, Retriever,
         hybrid::{EmbeddingModelMismatch, HybridConfig, HybridRetriever},
     },
+    store::chunks::ChunkStore,
 };
 use seed::{SeedChunk, document, embed, recall_at_k, similar_to};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -110,6 +111,48 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
     assert_eq!(ids(&results), [heading.0.as_str()]);
     let results = retriever.retrieve("usobt_c").await.unwrap();
     assert_eq!(ids(&results), [italic.0.as_str()]);
+}
+
+#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
+    let chunk = async |key: &str, text: &str| {
+        let doc = document(&pool, SourceKind::Markdown, key, key).await;
+        SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
+    };
+    let rare = chunk("payroll.md", "Payroll runs at month end.").await;
+    let common = chunk(
+        "owners.md",
+        "Role owners review role changes; every role needs a role owner.",
+    )
+    .await;
+    for i in 0..5 {
+        chunk(&format!("note-{i}.md"), &format!("Note {i} on the role.")).await;
+    }
+    ChunkStore::new(pool.clone())
+        .refresh_term_stats()
+        .await
+        .unwrap();
+
+    let results = retriever(&pool, full_text_only())
+        .retrieve("Which role handles payroll?")
+        .await
+        .unwrap();
+    assert_eq!(results[0].chunk.id, rare);
+    assert_eq!(results[1].chunk.id, common);
+    assert_eq!(results.len(), 7);
+}
+
+#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
+    let doc = document(&pool, SourceKind::Markdown, "obrien.md", "Owners").await;
+    let id = SeedChunk::new(&doc, "body", 0, "O'Brien owns the built-in roles.")
+        .insert(&pool)
+        .await;
+    let results = retriever(&pool, full_text_only())
+        .retrieve(r"O'Brien & !(built-in):* | 'roles\")
+        .await
+        .unwrap();
+    assert_eq!(ids(&results), [id.0.as_str()]);
 }
 
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]

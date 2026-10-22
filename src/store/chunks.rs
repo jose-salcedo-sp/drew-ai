@@ -268,6 +268,19 @@ impl ChunkStore {
         .rows_affected())
     }
 
+    /// Recomputes the full-text statistics that BM25 ranking reads (document frequency per lexeme, chunk count and
+    /// average length) from the current chunks, in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// When the query fails.
+    pub async fn refresh_term_stats(&self) -> eros::Result<(), (sqlx::Error,)> {
+        sqlx::query("SELECT refresh_fts_prose_stats()")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Supersedes current chunks of documents for `source` whose ids are not in `present`. Returns how many.
     ///
     /// # Errors

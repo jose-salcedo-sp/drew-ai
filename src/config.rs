@@ -269,6 +269,7 @@ fn read(path: &Path) -> eros::Result<PipelineConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retrieval::hybrid::Bm25;
 
     #[test]
     fn shipped_config_parses() {
@@ -379,5 +380,24 @@ mod tests {
             );
         }
         assert!(PipelineConfig::parse(r#"{"thresholds": {"answer": 1.0}}"#).is_ok());
+    }
+
+    #[test]
+    fn bm25_constants_are_checked_on_every_load_path() {
+        for bad in [
+            r#"{"retrieval": {"bm25": {"k1": -0.1}}}"#,
+            r#"{"retrieval": {"bm25": {"b": 1.5}}}"#,
+            r#"{"retrieval": {"bm25": {"b": -0.5}}}"#,
+            r#"{"retrieval": {"bm25": {"k1": 1e309}}}"#,
+            r#"{"retrieval": {"bm25": {"k": 1.2}}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+        let config = PipelineConfig::parse(r#"{"retrieval": {"bm25": {"b": 0.0}}}"#).unwrap();
+        assert_eq!(config.retrieval.bm25, Bm25::new(1.2, 0.0).unwrap());
     }
 }

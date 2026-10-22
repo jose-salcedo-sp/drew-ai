@@ -4,7 +4,11 @@
     "vector_candidates": 50,
     "rrf_k": 60.0,
     "fused_limit": 50,
-    "max_chunks_per_document": 3
+    "max_chunks_per_document": 3,
+    "bm25": {
+      "k1": 1.2,
+      "b": 0.75
+    }
   },
   "classify": {
     "min_confidence": 0.6
