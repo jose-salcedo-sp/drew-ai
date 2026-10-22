@@ -326,9 +326,11 @@ impl EmbedBackend {
         match self {
             Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/invoke")).await,
             Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, EMBEDDINGS_PATH)),
-            Self::WorkersAi { account_id, .. } => Some(Endpoint::new(
+            Self::WorkersAi {
+                account_id, model, ..
+            } => Some(Endpoint::new(
                 &cloudflare_api(),
-                &openai_path(account_id, EMBEDDINGS_PATH),
+                &run_path(account_id, model.id()),
             )),
         }
     }
@@ -594,7 +596,7 @@ impl SystemOneBackend {
                 account_id, model, ..
             } => Some(Endpoint::new(
                 &cloudflare_api(),
-                &run_path(account_id, model),
+                &run_path(account_id, model.id()),
             )),
         }
     }
@@ -963,7 +965,7 @@ mod tests {
         ));
         assert_eq!(
             embed.endpoint().await.unwrap().to_string(),
-            "https://api.cloudflare.com/client/v4/accounts/acc/ai/v1/embeddings"
+            "https://api.cloudflare.com/client/v4/accounts/acc/ai/run/@cf/baai/bge-m3"
         );
         let chat = ChatBackend::try_from(&cli.chat).unwrap();
         assert_eq!(

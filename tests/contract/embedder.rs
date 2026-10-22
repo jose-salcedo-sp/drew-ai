@@ -166,27 +166,74 @@ mod openai {
 
         use super::*;
 
-        const ROUTE: &str = "/client/v4/accounts/acc-123/ai/v1/embeddings";
+        const ROUTE: &str = "/client/v4/accounts/acc-123/ai/run/@cf/baai/bge-m3";
         const BGE_M3_LIMIT: usize = 60_000;
+        const BGE_M3_INPUT_LIMIT: usize = 8_192;
 
-        /// Workers AI as it counts a request: every input padded to the longest, here at 3 bytes a token. Over the
-        /// limit it answers with its envelope, as it did for `canon/LIMITS.md`.
+        fn failure(message: &str) -> ResponseTemplate {
+            ResponseTemplate::new(400).set_body_json(json!({
+                "result": {},
+                "success": false,
+                "errors": [{ "code": 5006, "message": message }],
+                "messages": [],
+            }))
+        }
+
+        /// The texts of each native `ai/run` request, `{"text": [...], "truncate_inputs": true}`.
+        fn sent_texts(requests: &[Request]) -> Vec<Vec<String>> {
+            requests
+                .iter()
+                .map(|request| {
+                    let body: Value = request.body_json().unwrap();
+                    assert_eq!(body["truncate_inputs"], true, "{body}");
+                    body["text"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|text| text.as_str().unwrap().to_owned())
+                        .collect()
+                })
+                .collect()
+        }
+
+        /// Workers AI's native bge-m3 route, at 3 bytes a token: without `truncate_inputs` an input over 8,192 tokens
+        /// fails, with it the input is cut to 8,192; then a request counts as its input count times its longest
+        /// input, as it did for `canon/LIMITS.md`. Answers in the envelope, `{"shape": [n, 1024], "data": [...]}`.
         struct BgeM3;
 
         impl Respond for BgeM3 {
             fn respond(&self, request: &Request) -> ResponseTemplate {
-                let tokens = padded(&sent_inputs(std::slice::from_ref(request))[0]);
-                if tokens > BGE_M3_LIMIT {
-                    return ResponseTemplate::new(400).set_body_json(json!({
-                        "result": null,
-                        "success": false,
-                        "errors": [{ "code": 5006, "message": format!(
-                            "Max context reached {tokens} tokens but model supports only {BGE_M3_LIMIT}"
-                        ) }],
-                        "messages": [],
-                    }));
+                let body: Value = request.body_json().unwrap();
+                let texts: Vec<&str> = body["text"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|text| text.as_str().unwrap())
+                    .collect();
+                let truncate = body["truncate_inputs"] == true;
+                let mut longest = 0;
+                for text in &texts {
+                    let tokens = text.len().div_ceil(3);
+                    if tokens > BGE_M3_INPUT_LIMIT && !truncate {
+                        return failure(&format!(
+                            "Sequence too long: {tokens} > {BGE_M3_INPUT_LIMIT}"
+                        ));
+                    }
+                    longest = longest.max(tokens.min(BGE_M3_INPUT_LIMIT));
                 }
-                embeddings(request)
+                let tokens = texts.len() * longest;
+                if tokens > BGE_M3_LIMIT {
+                    return failure(&format!(
+                        "Max context reached {tokens} tokens but model supports only {BGE_M3_LIMIT}"
+                    ));
+                }
+                let data: Vec<_> = texts.iter().map(|text| vector_of(text)).collect();
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "result": { "shape": [texts.len(), EMBEDDING_DIM], "data": data },
+                    "success": true,
+                    "errors": [],
+                    "messages": [],
+                }))
             }
         }
 
@@ -243,7 +290,7 @@ mod openai {
                 .await
                 .unwrap();
 
-            let sent = sent_inputs(&server.received_requests().await.unwrap());
+            let sent = sent_texts(&server.received_requests().await.unwrap());
             for batch in &sent {
                 assert!(padded(batch) <= 50_000, "{} texts", batch.len());
                 assert!(batch.len() <= 64);
@@ -253,24 +300,32 @@ mod openai {
             assert_eq!(vectors, expected);
         }
 
+        /// `A1-PASTEBACK.md` failed on the OpenAI-compatible route with `Sequence too long: 10670 > 8192`.
         #[tokio::test]
-        async fn a_text_over_the_models_budget_fails_before_any_request() {
+        async fn an_input_over_the_models_input_limit_is_embedded_not_rejected() {
             let server = responding(BgeM3).await;
-            let texts = [section(0, 3), section(1, 8_000)];
+            let texts = [
+                section(0, 3),
+                section(1, 1_800),
+                section(2, 3),
+                section(3, 8_000),
+            ];
+            assert!(texts[1].len().div_ceil(3) > 12_000);
+            assert!(texts[3].len().div_ceil(3) > 50_000);
 
-            let error = bge_m3(&server, "cf-token")
+            let vectors = bge_m3(&server, "cf-token")
                 .embed(&texts, EmbedPurpose::Document)
                 .await
-                .unwrap_err();
+                .unwrap();
 
-            let report = format!("{error:#?}");
+            let expected: Vec<_> = texts.iter().map(|text| vector_of(text)).collect();
+            assert_eq!(vectors, expected);
+            let sent = sent_texts(&server.received_requests().await.unwrap());
             assert!(
-                report.contains("text 1 of 2")
-                    && report.contains("@cf/baai/bge-m3's 60000-token request limit")
-                    && !report.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
-                "{report}"
+                sent.contains(&vec![texts[3].clone()]),
+                "over the budget, alone"
             );
-            assert!(server.received_requests().await.unwrap().is_empty());
+            assert_eq!(sent.concat(), texts);
         }
 
         #[tokio::test]
@@ -290,8 +345,8 @@ mod openai {
                 "Bearer cf-token"
             );
             assert_eq!(
-                sent.body_json::<Value>().unwrap()["model"],
-                "@cf/baai/bge-m3"
+                sent.body_json::<Value>().unwrap(),
+                json!({ "text": ["a"], "truncate_inputs": true })
             );
             let openai_compatible = super::embedder(&server).model();
             assert_eq!(
@@ -302,13 +357,7 @@ mod openai {
 
         #[tokio::test]
         async fn an_error_envelope_names_the_model_and_its_errors_but_not_the_token() {
-            let server = responding(ResponseTemplate::new(400).set_body_json(json!({
-                "result": null,
-                "success": false,
-                "errors": [{ "code": 5006, "message": "Max context reached 102060 tokens but model supports only 60000" }],
-                "messages": [],
-            })))
-            .await;
+            let server = responding(failure("Sequence too long: 10670 > 8192")).await;
 
             let error = bge_m3(&server, "cf-secret-token")
                 .embed(&["a".into()], EmbedPurpose::Document)
@@ -318,7 +367,7 @@ mod openai {
             let report = format!("{error:?}");
             assert!(
                 report.contains(
-                    "@cf/baai/bge-m3 failed with 400 Bad Request: 5006: Max context reached"
+                    "@cf/baai/bge-m3 failed with 400 Bad Request: 5006: Sequence too long: 10670 > 8192"
                 ) && report.contains(ROUTE),
                 "{report}"
             );
@@ -339,10 +388,29 @@ mod openai {
             let host = server.address().to_string();
             assert!(
                 report.contains(&format!(
-                    "@cf/baai/bge-m3 at {host} returned 502 Bad Gateway"
+                    "@cf/baai/bge-m3 at {host} returned 502 Bad Gateway without the Workers AI envelope"
                 )) && report.contains(&body[..200])
                     && !report.contains(&body[..201]),
                 "{report}"
+            );
+        }
+
+        #[tokio::test]
+        async fn fewer_vectors_than_inputs_is_an_error() {
+            let server = responding(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "shape": [1, EMBEDDING_DIM], "data": [vec![0.0; EMBEDDING_DIM]] },
+                "success": true, "errors": [], "messages": [],
+            })))
+            .await;
+
+            let error = bge_m3(&server, "cf-token")
+                .embed(&["a".into(), "b".into()], EmbedPurpose::Document)
+                .await
+                .unwrap_err();
+
+            assert!(
+                format!("{error:#?}").contains("expected 2 embeddings, got 1"),
+                "{error:#?}"
             );
         }
     }
