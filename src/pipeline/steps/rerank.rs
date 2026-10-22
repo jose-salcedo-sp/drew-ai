@@ -7,9 +7,12 @@ use std::{
 use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
-    config::RerankConfig,
+    config::{RerankConfig, RerankJudge, SystemOneJudge},
     domain::{ChunkId, Probability, Question},
-    llm::system_one::{Decision, DecisionRequest, SystemOne},
+    llm::{
+        ModelRef,
+        system_one::{Decision, DecisionRequest, SystemOne},
+    },
     pipeline::{Category, DeclineReason, Scored, Step, StepError, trace::RerankRecord},
     retrieval::Retrieved,
 };
@@ -27,44 +30,63 @@ const RRF_K: f32 = 60.0;
 
 /// Picks the `top_k` matches that best answer the question, each followed by the context retrieval attached to it.
 ///
-/// With System One, the best `candidates` matches by fused score are each judged by one yes/no question. Matches
-/// are then ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes rank, so the
-/// judgement refines retrieval instead of replacing it; the trace records each probability of yes, and the best
-/// kept one scores the step. Without System One, matches are ordered by retrieval rank alone and the step is
+/// With System One as the judge, the best `candidates` matches by fused score are each judged by one yes/no
+/// question. Matches are then ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes
+/// rank, so the judgement refines retrieval instead of replacing it; the trace records each probability of yes, and
+/// the best kept one scores the step. Without a judge, matches are ordered by retrieval rank alone and the step is
 /// unscored. Matches always keep their fused score. Either way an evidence match is ranked
 /// `evidence_rank_penalty` places lower, so Drew's settled answers lead unless the evidence is clearly better.
 pub struct Rerank<TCategory> {
     top_k: usize,
-    candidates: usize,
     evidence_rank_penalty: usize,
     threshold: Option<Probability>,
-    system_one: Option<Arc<dyn SystemOne>>,
+    judge: Option<Judge>,
     category: PhantomData<TCategory>,
 }
 
+/// System One and the number of best matches by fused score it judges.
+struct Judge {
+    system_one: Arc<dyn SystemOne>,
+    candidates: usize,
+}
+
 impl<TCategory> Rerank<TCategory> {
-    /// The default evidence penalty and no threshold.
+    /// The default evidence penalty and no threshold. `candidates` applies only with System One.
     pub fn new(top_k: usize, candidates: usize, system_one: Option<Arc<dyn SystemOne>>) -> Self {
         Self {
             top_k,
-            candidates,
-            evidence_rank_penalty: RerankConfig::default().evidence_rank_penalty,
+            evidence_rank_penalty: RerankConfig::default().evidence_rank_penalty(),
             threshold: None,
-            system_one,
+            judge: system_one.map(|system_one| Judge {
+                system_one,
+                candidates,
+            }),
             category: PhantomData,
         }
     }
 
-    /// Every setting from the config, plus the step's threshold for its category.
+    /// Every setting from the config, plus the step's threshold for its category. `system_one` judges only when
+    /// the config's judge is [`RerankJudge::SystemOne`].
     pub fn from_config(
         config: &RerankConfig,
         threshold: Option<Probability>,
         system_one: Option<Arc<dyn SystemOne>>,
     ) -> Self {
+        let judge = match config.judge() {
+            RerankJudge::None => None,
+            RerankJudge::SystemOne(SystemOneJudge { candidates }) => {
+                system_one.map(|system_one| Judge {
+                    system_one,
+                    candidates,
+                })
+            }
+        };
         Self {
-            evidence_rank_penalty: config.evidence_rank_penalty,
+            top_k: config.top_k(),
+            evidence_rank_penalty: config.evidence_rank_penalty(),
             threshold,
-            ..Self::new(config.top_k, config.candidates, system_one)
+            judge,
+            category: PhantomData,
         }
     }
 
@@ -73,9 +95,14 @@ impl<TCategory> Rerank<TCategory> {
         self.top_k
     }
 
-    /// Matches System One judges.
-    pub fn candidates(&self) -> usize {
-        self.candidates
+    /// Matches System One judges; `None` when no model judges.
+    pub fn candidates(&self) -> Option<usize> {
+        self.judge.as_ref().map(|judge| judge.candidates)
+    }
+
+    /// The model that judges the matches; `None` when they keep retrieval order.
+    pub fn judged_by(&self) -> Option<ModelRef> {
+        self.judge.as_ref().map(|judge| judge.system_one.model())
     }
 }
 
@@ -148,7 +175,7 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
 
     /// Without System One the step is unscored, so no threshold applies.
     fn threshold(&self) -> Option<Probability> {
-        self.threshold.filter(|_| self.system_one.is_some())
+        self.threshold.filter(|_| self.judge.is_some())
     }
 
     async fn run(
@@ -167,8 +194,12 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
         let mut raw = None;
         let mut model = None;
         let mut judged: HashMap<ChunkId, Probability> = HashMap::new();
-        if let Some(system_one) = &self.system_one {
-            matches.truncate(self.candidates);
+        if let Some(Judge {
+            system_one,
+            candidates,
+        }) = &self.judge
+        {
+            matches.truncate(*candidates);
             let judged_by = model.insert(system_one.model()).clone();
             let requests: Vec<_> = matches
                 .iter()
@@ -264,6 +295,7 @@ mod tests {
         domain::Chunk,
         llm::{
             ModelRef,
+            fakes::ScriptedSystemOne,
             system_one::{DecisionAnswer, DecisionResponse, SystemOne},
         },
         pipeline::{Open, StepErrorKind, steps::fixtures::chunk},
@@ -433,6 +465,97 @@ mod tests {
         far.push(authoritative(hit("settled", "p=0.01", 0.1)));
         let scored = rerank(Rerank::new(1, 50, with_system_one()), far).await;
         assert_eq!(ids(&scored.output), ["evidence"]);
+    }
+
+    fn config(json: &str) -> RerankConfig {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn scripted(probabilities: &[f32]) -> Arc<ScriptedSystemOne> {
+        Arc::new(ScriptedSystemOne::new(probabilities.iter().map(|&noul| {
+            Ok(DecisionResponse {
+                answers: BTreeMap::from([(QUESTION_ID.into(), DecisionAnswer::Noul { noul })]),
+            })
+        })))
+    }
+
+    fn many() -> Vec<Retrieved> {
+        vec![
+            hit("fused-best", "", 0.9),
+            hit("fused-second", "", 0.8),
+            authoritative(hit("fused-third", "", 0.7)),
+            hit("fused-fourth", "", 0.6),
+        ]
+    }
+
+    #[tokio::test]
+    async fn without_a_judge_system_one_is_never_called() {
+        let system_one = scripted(&[]);
+        let step = Rerank::<Open>::from_config(
+            &config(r#"{"top_k": 2, "judge": "none"}"#),
+            Some(Probability::new(0.9).unwrap()),
+            Some(Arc::<ScriptedSystemOne>::clone(&system_one) as Arc<dyn SystemOne>),
+        );
+        assert_eq!(step.threshold(), None);
+        assert_eq!(step.judged_by(), None);
+        assert_eq!(step.candidates(), None);
+
+        let scored = rerank(step, many()).await;
+
+        assert!(system_one.requests().is_empty());
+        // Retrieval order, the evidence penalty lifting the authoritative third match to the top.
+        assert_eq!(ids(&scored.output), ["fused-third", "fused-best"]);
+        assert_eq!(scored.score, None);
+        assert_eq!(scored.model, None);
+        assert_eq!(scored.record.raw, None);
+        assert!(scored.record.chunks.iter().all(|c| c.probability.is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_system_one_judge_works_as_before() {
+        let system_one = scripted(&[0.2, 0.95, 0.6]);
+        let threshold = Some(Probability::new(0.5).unwrap());
+        let step = Rerank::<Open>::from_config(
+            &config(r#"{"top_k": 2, "judge": {"system_one": {"candidates": 3}}}"#),
+            threshold,
+            Some(Arc::<ScriptedSystemOne>::clone(&system_one) as Arc<dyn SystemOne>),
+        );
+        assert_eq!(step.threshold(), threshold);
+        assert_eq!(step.candidates(), Some(3));
+        assert_eq!(
+            step.judged_by(),
+            Some(ModelRef::new("fake-system-one", "1"))
+        );
+
+        let scored = rerank(step, many()).await;
+
+        assert_eq!(system_one.requests().len(), 3);
+        let same = rerank(
+            Rerank::new(2, 3, Some(Arc::new(ByText))),
+            vec![
+                hit("fused-best", "p=0.2", 0.9),
+                hit("fused-second", "p=0.95", 0.8),
+                authoritative(hit("fused-third", "p=0.6", 0.7)),
+                hit("fused-fourth", "p=1.0", 0.6),
+            ],
+        )
+        .await;
+        assert_eq!(ids(&scored.output), ids(&same.output));
+        assert_eq!(scored.score, Some(Probability::new(0.95).unwrap()));
+        assert_eq!(scored.score, same.score);
+        assert_eq!(scored.prompt_version, Some(RERANK_PROMPT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn a_system_one_judge_without_system_one_keeps_retrieval_order() {
+        let step = Rerank::<Open>::from_config(
+            &config(r#"{"top_k": 2, "judge": {"system_one": {"candidates": 3}}}"#),
+            Some(Probability::new(0.5).unwrap()),
+            None,
+        );
+        assert_eq!(step.threshold(), None);
+        let scored = rerank(step, many()).await;
+        assert_eq!(ids(&scored.output), ["fused-third", "fused-best"]);
     }
 
     #[test]

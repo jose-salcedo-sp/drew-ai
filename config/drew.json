@@ -19,7 +19,7 @@
   },
   "rerank": {
     "top_k": 5,
-    "candidates": 25,
+    "judge": "none",
     "evidence_rank_penalty": 10
   },
   "thresholds": {},

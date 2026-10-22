@@ -54,7 +54,7 @@ pub struct PipelineArgs {
     /// The `Explain` LLM.
     #[command(flatten)]
     pub chat: ChatArgs,
-    /// System One, for `Classify`, `Rerank` and `Answer`.
+    /// System One, for `Classify`, `Answer`, and `Rerank` when `rerank.judge` names it.
     #[command(flatten)]
     pub system_one: SystemOneArgs,
 }
@@ -66,8 +66,12 @@ pub struct Models {
     pub embedding: Option<ModelRef>,
     /// The `Explain` LLM.
     pub explain: ModelRef,
-    /// Classify, Rerank and Answer. `None`: every question is `open` and reranking keeps retrieval order.
+    /// Classify and Answer, and Rerank when `rerank` is set. `None`: every question is `open`.
     pub system_one: Option<ModelRef>,
+    /// The Rerank judge. `None`: reranking keeps retrieval order, because `rerank.judge` is `none` or System One
+    /// is not configured. Also `None` in files written before it was recorded, whose config says who judged.
+    #[serde(default)]
+    pub rerank: Option<ModelRef>,
 }
 
 /// The production [`Answerer`]: builds every step and pipeline once, then answers questions concurrently.
@@ -133,7 +137,7 @@ impl PipelineAnswerer {
         }
     }
 
-    /// Classify, Rerank and Answer on System One.
+    /// Classify and Answer on System One, and Rerank when `rerank.judge` names it.
     pub fn with_system_one(self, system_one: Arc<dyn SystemOne>) -> Self {
         Self::build(
             self.config,
@@ -170,11 +174,13 @@ impl PipelineAnswerer {
                 .system_one
                 .as_ref()
                 .map(|system_one| system_one.model()),
+            rerank: self.rerank_open.judged_by(),
         }
     }
 
-    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify`, `Rerank` and `Answer`
-    /// on System One when configured. Every tunable comes from the pipeline config file.
+    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Answer` on System
+    /// One when configured, and `Rerank` too when `rerank.judge` names it. Every tunable comes from the pipeline
+    /// config file.
     ///
     /// # Errors
     ///
