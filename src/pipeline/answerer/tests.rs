@@ -543,22 +543,38 @@ async fn the_reranker_asks_system_one_about_each_match() {
         }
     }
 
-    let agr = agr_users();
-    let chat = Arc::new(ScriptedChat::replying([reply(&json!([
-        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
-    ]))]));
-    let system_one = Arc::new(Counting::default());
-    let report = answerer(corpus(), &chat)
-        .with_system_one(Arc::<Counting>::clone(&system_one))
-        .answer(Question::new(QUESTION))
-        .await;
+    for (config, judged) in [
+        (
+            r#"{"rerank": {"judge": {"system_one": {"candidates": 25}}}}"#,
+            true,
+        ),
+        (r#"{"rerank": {"judge": "none"}}"#, false),
+    ] {
+        let agr = agr_users();
+        let chat = Arc::new(ScriptedChat::replying([reply(&json!([
+            { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
+        ]))]));
+        let system_one = Arc::new(Counting::default());
+        let answerer = answerer(corpus(), &chat)
+            .with_system_one(Arc::<Counting>::clone(&system_one))
+            .with_config(PipelineConfig::parse(config).unwrap());
+        let models = answerer.models();
+        let report = answerer.answer(Question::new(QUESTION)).await;
 
-    let rerank = report
-        .trace
-        .entries()
-        .iter()
-        .find(|e| e.step == "rerank")
-        .unwrap();
-    assert!(rerank.model.is_some(), "{:?}", rerank);
-    assert!(system_one.0.load(Ordering::SeqCst) > 1);
+        let rerank = report
+            .trace
+            .entries()
+            .iter()
+            .find(|e| e.step == "rerank")
+            .unwrap();
+        assert!(models.system_one.is_some(), "{config}");
+        assert_eq!(rerank.model.is_some(), judged, "{config}: {rerank:?}");
+        assert_eq!(models.rerank.is_some(), judged, "{config}");
+        let calls = system_one.0.load(Ordering::SeqCst);
+        if judged {
+            assert!(calls > 1, "{config}: {calls}");
+        } else {
+            assert_eq!(calls, 1, "{config}: only Classify calls System One");
+        }
+    }
 }

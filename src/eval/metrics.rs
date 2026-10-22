@@ -60,9 +60,29 @@ pub struct RunSetup {
     /// `git describe --always --dirty` of the working tree, when it is a git checkout.
     pub git: Option<String>,
     /// Every tunable the pipeline ran with.
+    #[serde(deserialize_with = "recorded_config")]
     pub config: PipelineConfig,
     /// The models it called.
     pub models: Models,
+}
+
+/// Files written before `rerank.judge` existed record a flat `rerank.candidates`, which System One judged.
+fn recorded_config<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PipelineConfig, D::Error> {
+    let mut config = serde_json::Value::deserialize(deserializer)?;
+    if let Some(rerank) = config
+        .get_mut("rerank")
+        .and_then(serde_json::Value::as_object_mut)
+        && !rerank.contains_key("judge")
+        && let Some(candidates) = rerank.remove("candidates")
+    {
+        rerank.insert(
+            "judge".into(),
+            serde_json::json!({ "system_one": { "candidates": candidates } }),
+        );
+    }
+    serde_json::from_value(config).map_err(serde::de::Error::custom)
 }
 
 /// One golden question, its run, and how the run scored.

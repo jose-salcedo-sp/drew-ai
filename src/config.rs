@@ -143,7 +143,7 @@ pub struct PipelineConfig {
     pub retrieval: HybridConfig,
     /// When a classification is confident enough to leave the `open` path.
     pub classify: ClassifyConfig,
-    /// How many matches System One judges and keeps.
+    /// Who judges the matches, and how many are kept.
     pub rerank: RerankConfig,
     /// The shape of a `drew eval tune` candidate's `thresholds`.
     pub thresholds: Thresholds,
@@ -159,25 +159,147 @@ pub struct ClassifyConfig {
     pub min_confidence: Option<Probability>,
 }
 
-/// [`PipelineConfig::rerank`]. [`PipelineConfig::parse`] requires `0 < top_k <= candidates`.
+/// [`PipelineConfig::rerank`]: `0 < top_k`, and `top_k <= candidates` when System One judges.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "RawRerankConfig")]
 pub struct RerankConfig {
-    /// Matches kept for `Answer` and `Explain`.
-    pub top_k: usize,
+    top_k: usize,
+    judge: RerankJudge,
+    evidence_rank_penalty: usize,
+}
+
+/// Who judges the matches `Rerank` orders. Classify and Answer use System One either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankJudge {
+    /// No model: matches keep retrieval order, with the evidence penalty, and the step is unscored.
+    #[default]
+    None,
+    /// System One judges the best matches by fused score, when System One is configured.
+    SystemOne(SystemOneJudge),
+}
+
+/// [`RerankJudge::SystemOne`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemOneJudge {
     /// Best matches by fused retrieval score that System One judges.
     pub candidates: usize,
+}
+
+/// A rerank config that breaks [`RerankConfig`]'s invariants.
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidRerankConfig {
+    /// `top_k` is 0.
+    #[error("rerank.top_k must be at least 1")]
+    NothingKept,
+    /// System One judges fewer matches than are kept.
+    #[error("rerank.top_k ({top_k}) exceeds the {candidates} candidates System One judges")]
+    MoreKeptThanJudged {
+        /// Matches kept.
+        top_k: usize,
+        /// Matches judged.
+        candidates: usize,
+    },
+    /// The flat `candidates` of configs written before `judge`.
+    #[error(
+        r#"rerank.candidates applies only to the System One judge; write "judge": {{"system_one": {{"candidates": {0}}}}}, or "judge": "none""#
+    )]
+    CandidatesWithoutJudge(usize),
+    /// `"judge": "system_one"`, which leaves out how many matches it judges.
+    #[error(
+        r#"rerank.judge "system_one" needs its candidates; write "judge": {{"system_one": {{"candidates": 25}}}}"#
+    )]
+    SystemOneWithoutCandidates,
+    /// Neither `"none"` nor `{"system_one": {"candidates": N}}`.
+    #[error("rerank.judge: {0}")]
+    Judge(serde_json::Error),
+}
+
+impl RerankConfig {
+    /// # Errors
+    ///
+    /// When `top_k` is 0, or exceeds the System One judge's `candidates`.
+    pub fn new(
+        top_k: usize,
+        judge: RerankJudge,
+        evidence_rank_penalty: usize,
+    ) -> Result<Self, InvalidRerankConfig> {
+        if top_k == 0 {
+            return Err(InvalidRerankConfig::NothingKept);
+        }
+        match judge {
+            RerankJudge::SystemOne(SystemOneJudge { candidates }) if candidates < top_k => {
+                Err(InvalidRerankConfig::MoreKeptThanJudged { top_k, candidates })
+            }
+            RerankJudge::None | RerankJudge::SystemOne(_) => Ok(Self {
+                top_k,
+                judge,
+                evidence_rank_penalty,
+            }),
+        }
+    }
+
+    /// Matches kept for `Answer` and `Explain`.
+    pub fn top_k(&self) -> usize {
+        self.top_k
+    }
+
+    /// Who judges the matches.
+    pub fn judge(&self) -> RerankJudge {
+        self.judge
+    }
+
     /// An evidence (non-authoritative) match is ranked as if this many places lower.
-    pub evidence_rank_penalty: usize,
+    pub fn evidence_rank_penalty(&self) -> usize {
+        self.evidence_rank_penalty
+    }
 }
 
 impl Default for RerankConfig {
     fn default() -> Self {
         Self {
             top_k: 5,
-            candidates: 25,
+            judge: RerankJudge::None,
             evidence_rank_penalty: 10,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawRerankConfig {
+    top_k: usize,
+    judge: serde_json::Value,
+    evidence_rank_penalty: usize,
+    candidates: Option<usize>,
+}
+
+impl Default for RawRerankConfig {
+    fn default() -> Self {
+        let config = RerankConfig::default();
+        Self {
+            top_k: config.top_k,
+            judge: serde_json::to_value(config.judge)
+                .expect("a judge is plain data, which always serializes"),
+            evidence_rank_penalty: config.evidence_rank_penalty,
+            candidates: None,
+        }
+    }
+}
+
+impl TryFrom<RawRerankConfig> for RerankConfig {
+    type Error = InvalidRerankConfig;
+
+    fn try_from(raw: RawRerankConfig) -> Result<Self, Self::Error> {
+        if let Some(candidates) = raw.candidates {
+            return Err(InvalidRerankConfig::CandidatesWithoutJudge(candidates));
+        }
+        if raw.judge == "system_one" {
+            return Err(InvalidRerankConfig::SystemOneWithoutCandidates);
+        }
+        let judge = serde_json::from_value(raw.judge).map_err(InvalidRerankConfig::Judge)?;
+        Self::new(raw.top_k, judge, raw.evidence_rank_penalty)
     }
 }
 
@@ -236,20 +358,10 @@ impl PipelineConfig {
     ///
     /// # Errors
     ///
-    /// On invalid JSON, an unknown key, a probability outside `0..=1`, an unthresholded step name, or rerank
-    /// counts that break `0 < top_k <= candidates`.
+    /// On invalid JSON, an unknown key, a probability outside `0..=1`, an unthresholded step name, or an
+    /// [`InvalidRerankConfig`].
     pub fn parse(text: &str) -> eros::Result<Self> {
-        let config: Self = serde_json::from_str(text)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    fn validate(&self) -> eros::Result<()> {
-        eros::ensure!(
-            self.rerank.top_k > 0 && self.rerank.candidates >= self.rerank.top_k,
-            "rerank needs 0 < top_k <= candidates"
-        );
-        Ok(())
+        Ok(serde_json::from_str(text)?)
     }
 
     /// The category's override, else the general threshold.
@@ -326,9 +438,72 @@ mod tests {
             r#"{"rerank": {"top": 5}}"#,
             r#"{"thresholds": {"classify": 0.5}}"#,
             r#"{"per_category": {"boolean": {"explain": 0.5}}}"#,
-            r#"{"rerank": {"top_k": 10, "candidates": 5}}"#,
         ] {
             assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_rerank_judge_is_none_or_system_one_with_its_candidates() {
+        let config = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        assert_eq!(config.rerank.judge(), RerankJudge::None);
+        assert_eq!(RerankConfig::default().judge(), RerankJudge::None);
+        let config = PipelineConfig::parse(
+            r#"{"rerank": {"top_k": 5, "judge": {"system_one": {"candidates": 25}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.rerank.judge(),
+            RerankJudge::SystemOne(SystemOneJudge { candidates: 25 })
+        );
+        assert_eq!(
+            PipelineConfig::parse(r#"{"rerank": {"judge": "none", "top_k": 50}}"#)
+                .unwrap()
+                .rerank
+                .top_k(),
+            50
+        );
+    }
+
+    #[test]
+    fn invalid_rerank_judges_are_rejected_on_every_load_path() {
+        for (bad, says) in [
+            (
+                r#"{"rerank": {"candidates": 25}}"#,
+                r#""judge": {"system_one": {"candidates": 25}}"#,
+            ),
+            (
+                r#"{"rerank": {"judge": "none", "candidates": 25}}"#,
+                "applies only to the System One judge",
+            ),
+            (
+                r#"{"rerank": {"top_k": 10, "judge": {"system_one": {"candidates": 5}}}}"#,
+                "rerank.top_k (10) exceeds the 5 candidates",
+            ),
+            (
+                r#"{"rerank": {"top_k": 0}}"#,
+                "rerank.top_k must be at least 1",
+            ),
+            (r#"{"rerank": {"judge": "kev"}}"#, "unknown variant `kev`"),
+            (
+                r#"{"rerank": {"judge": "system_one"}}"#,
+                r#"needs its candidates; write "judge": {"system_one": {"candidates": 25}}"#,
+            ),
+            (
+                r#"{"rerank": {"judge": {"system_one": {}}}}"#,
+                "missing field `candidates`",
+            ),
+            (
+                r#"{"rerank": {"judge": {"system_one": {"candidates": 25, "top_k": 5}}}}"#,
+                "unknown field `top_k`",
+            ),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(says), "{bad}: {error}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
         }
     }
 

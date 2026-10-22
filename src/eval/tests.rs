@@ -555,6 +555,10 @@ fn results_written_before_context_for_still_parse() {
     let v4 = include_str!("../../eval/results/daas-2026-10-21-v4.json");
     let results: Results = serde_json::from_str(v4).unwrap();
     assert_eq!(results.runs.len(), 58);
+    assert_eq!(
+        results.setup.as_ref().unwrap().config.rerank.judge(),
+        crate::config::RerankJudge::SystemOne(crate::config::SystemOneJudge { candidates: 25 })
+    );
     let baseline = retrieval::BaselineRecords::parse(v4).unwrap();
     for run in &results.runs {
         assert!(baseline.contains(&run.golden.id));

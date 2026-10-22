@@ -13,7 +13,7 @@ What works today:
 
 - Batch ingestion of a markdown directory into Postgres with pgvector.
 - Hybrid retrieval (full text + vectors, reciprocal rank fusion).
-- Classify and Rerank on a System One model ([Kev](https://github.com/jaredpalmer/kev)), with calibrated confidence scores.
+- Classify and Answer on a System One model ([Kev](https://github.com/jaredpalmer/kev)), with calibrated confidence scores; Rerank on it too when `rerank.judge` says so.
 - The `open` path end to end: retrieve, rerank, explain with an LLM, verify every citation.
 - OpenAI-compatible HTTP API, run persistence with full traces (trace on `GET /v1/runs/{id}`, not in chat responses).
 - Optional Slack bot when `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are set.
@@ -51,11 +51,13 @@ sequenceDiagram
         DB-->>P: 50 chunks, with neighbouring sections as context
     end
     Note over P: Below classify.min_confidence, or choice and ranking: the open path
-    loop Rerank: each of the top 25 matches
-        P->>K: does this text help answer the question?
-        K-->>P: probability of yes
+    opt rerank.judge is system_one (off by default)
+        loop Rerank: each of the top 25 matches
+            P->>K: does this text help answer the question?
+            K-->>P: probability of yes
+        end
     end
-    Note over P: Rerank fuses that with retrieval rank and keeps 5
+    Note over P: Rerank keeps the best 5 by retrieval rank,<br/>fused with System One's when it judges
     opt boolean
         P->>K: Answer: going by these sources, is the answer yes?
         K-->>P: verdict and its confidence, checked against the threshold
@@ -147,7 +149,14 @@ Switching embedding models requires `drew ingest --reembed`.
 
 ## Configuration
 
-Tunables (retrieval, the Classify fallback, Rerank, step thresholds) are in [`config/drew.json`](config/drew.json), or the file `DREW_CONFIG` names; unknown keys are rejected. `drew eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file.
+Tunables (retrieval, the Classify fallback, Rerank, step thresholds) are in [`config/drew.json`](config/drew.json), or the file `DREW_CONFIG` names; unknown keys are rejected. `drew eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file; `models.rerank` names the model that judged Rerank, or is `null` when none did.
+
+`rerank.judge` chooses who judges Rerank's matches, independent of Classify and Answer, which use System One whenever it is configured:
+
+- `"none"` (the default and the shipped setting): matches keep retrieval order, with evidence ranked `evidence_rank_penalty` places lower; no model call, and no Rerank threshold applies.
+- `{"system_one": {"candidates": 25}}`: System One judges the best 25 matches by fused score, as before. `candidates` lives inside the variant because it means nothing without a judge, and must be at least `top_k`.
+
+On the 2026-10-22 DaaS run (`eval/results/daas-2026-10-22-v5.json`) System One reranking cost about 40 s and 25 System One calls per question for hit@5 43/58 against 41/58 in retrieval order, and was worse on yes/no questions (7/15 against 10/15), so it is off.
 
 See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), model URLs, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
 
