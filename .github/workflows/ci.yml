@@ -1,9 +1,14 @@
 name: CI
 
+# Files no build, test or doctest reads. Rust inputs outside src/ and tests/ (config/, eval/, migrations/) are
+# deliberately not listed: tests include_str! them. Safe while no check is required; a required check would stay
+# pending on a PR this filter skips.
 on:
   pull_request:
+    paths-ignore: ["docs/**", "*.md", ".gitignore"]
   push:
     branches: [master]
+    paths-ignore: ["docs/**", "*.md", ".gitignore"]
 
 permissions:
   contents: read
