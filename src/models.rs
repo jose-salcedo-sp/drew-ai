@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use crate::{
     llm::{
         ChatModel, ChatRequest, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
-        backend::{ChatBackend, EmbedBackend, SystemOneBackend},
+        backend::{ChatBackend, EmbedBackend, Endpoint, SystemOneBackend},
         system_one::{Decision, DecisionRequest, SystemOne},
     },
     pipeline::answerer::PipelineArgs,
@@ -78,6 +78,8 @@ pub enum Outcome {
     Called {
         /// The adapter's model.
         model: ModelRef,
+        /// Where the adapter sent its call; `None` on Bedrock with no AWS region.
+        endpoint: Option<Endpoint>,
         /// Time spent in the call.
         latency: Duration,
         /// The call's outcome.
@@ -121,10 +123,16 @@ impl fmt::Display for Check {
                 Outcome::NotBuilt(error) => writeln!(f, "{port:<10}  not built\n{error:#?}")?,
                 Outcome::Called {
                     model: ModelRef { id, version },
+                    endpoint,
                     latency,
                     result,
                 } => {
-                    write!(f, "{port:<10}  {id} ({version})  {latency:.1?}  ")?;
+                    write!(f, "{port:<10}  {id} ({version})  ")?;
+                    match endpoint {
+                        Some(endpoint) => write!(f, "{endpoint}  ")?,
+                        None => write!(f, "endpoint unknown  ")?,
+                    }
+                    write!(f, "{latency:.1?}  ")?;
                     match result {
                         Ok(()) => writeln!(f, "ok")?,
                         Err(error) => writeln!(f, "error\n{error:#?}")?,
@@ -187,13 +195,19 @@ fn not_built(port: Port, error: eros::ErrorUnion) -> Probed {
 }
 
 /// Times `call`, which does nothing until awaited here.
-async fn timed(port: Port, model: ModelRef, call: impl Future<Output = eros::Result<()>>) -> Probe {
+async fn timed(
+    port: Port,
+    model: ModelRef,
+    endpoint: Option<Endpoint>,
+    call: impl Future<Output = eros::Result<()>>,
+) -> Probe {
     let start = Instant::now();
     let result = call.await;
     Probe {
         port,
         outcome: Outcome::Called {
             model,
+            endpoint,
             latency: start.elapsed(),
             result,
         },
@@ -206,8 +220,17 @@ async fn probe_embeddings(args: &PipelineArgs) -> Probed {
         Err(error) => return not_built(Port::Embeddings, error.into()),
     };
     let note = backend.note().await;
+    let endpoint = backend.endpoint().await;
     let probe = match backend.build().await {
-        Ok(embedder) => timed(Port::Embeddings, embedder.model(), embed_once(&*embedder)).await,
+        Ok(embedder) => {
+            timed(
+                Port::Embeddings,
+                embedder.model(),
+                endpoint,
+                embed_once(&*embedder),
+            )
+            .await
+        }
         Err(error) => return (note, not_built(Port::Embeddings, error).1),
     };
     (note, Some(probe))
@@ -232,8 +255,9 @@ async fn probe_explain(args: &PipelineArgs) -> Probed {
         Err(error) => return not_built(Port::Explain, error.into()),
     };
     let note = backend.note().await;
+    let endpoint = backend.endpoint().await;
     let probe = match backend.build().await {
-        Ok(chat) => timed(Port::Explain, chat.model(), explain_once(&*chat)).await,
+        Ok(chat) => timed(Port::Explain, chat.model(), endpoint, explain_once(&*chat)).await,
         Err(error) => return (note, not_built(Port::Explain, error).1),
     };
     (note, Some(probe))
@@ -270,11 +294,13 @@ async fn probe_system_one(args: &PipelineArgs) -> Probed {
         Err(error) => return not_built(Port::SystemOne, error.into()),
     };
     let note = backend.note();
+    let endpoint = backend.endpoint();
     let probe = match backend.build() {
         Ok(Some(system_one)) => Some(
             timed(
                 Port::SystemOne,
                 system_one.model(),
+                endpoint,
                 decide_once(&*system_one),
             )
             .await,

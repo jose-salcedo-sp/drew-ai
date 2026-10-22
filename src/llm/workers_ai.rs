@@ -27,6 +27,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEF_FLASH_CONTEXT_TOKENS: u64 = 24_576;
 /// A request whose input came within this many tokens of its model's context may have lost the end of its state.
 const TRUNCATION_MARGIN: u64 = 512;
+/// How much of a body outside the envelope an error quotes.
+const BODY_PREVIEW_BYTES: usize = 200;
 
 /// A Workers AI model id, `@cf/{vendor}/{name}` (or `@hf/...`), e.g. `@cf/cloudflare/clef-flash`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,7 +112,8 @@ impl WorkersAiSystemOne {
         })
     }
 
-    /// Another API root in place of `https://api.cloudflare.com/client/v4`, such as a test server or a gateway.
+    /// Another API root in place of `https://api.cloudflare.com/client/v4`, such as a test server. No setting reaches
+    /// it: a URL left over from another backend would send Clef's requests to the wrong server.
     pub fn with_api_base(self, api_base: &Url) -> Self {
         Self {
             api_base: api_base.as_str().trim_end_matches('/').to_owned(),
@@ -120,12 +123,23 @@ impl WorkersAiSystemOne {
 
     fn route(&self) -> String {
         format!(
-            "{}/accounts/{}/ai/run/{}",
+            "{}/{}",
             self.api_base,
-            self.account_id,
-            self.model.id()
+            run_path(&self.account_id, &self.model)
         )
     }
+}
+
+/// The public Cloudflare API root.
+pub(crate) fn cloudflare_api() -> Url {
+    CLOUDFLARE_API
+        .parse()
+        .expect("CLOUDFLARE_API is a valid URL")
+}
+
+/// The model's run route under the API root.
+pub(crate) fn run_path(account_id: &str, model: &WorkersAiModel) -> String {
+    format!("accounts/{account_id}/ai/run/{}", model.id())
 }
 
 #[eros::context("building the Workers AI HTTP client")]
@@ -147,12 +161,12 @@ impl SystemOne for WorkersAiSystemOne {
     }
 }
 
-/// Workers AI's REST envelope.
+/// Workers AI's REST envelope. `success` is required, so a JSON body from another server is not read as an empty
+/// failure.
 #[derive(Deserialize)]
 struct Envelope {
     #[serde(default)]
     result: Option<RunResult>,
-    #[serde(default)]
     success: bool,
     #[serde(default)]
     errors: Vec<ApiMessage>,
@@ -205,9 +219,22 @@ impl WorkersAiSystemOne {
             .send()
             .await?;
         let status = response.status();
+        let url = response.url();
+        let host = format!(
+            "{}{}",
+            url.host_str().unwrap_or_default(),
+            url.port()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default()
+        );
         let text = response.text().await?;
-        let envelope = serde_json::from_str::<Envelope>(&text)
-            .with_context(|| format!("{} returned {status}: {text}", self.model))?;
+        let envelope = serde_json::from_str::<Envelope>(&text).with_context(|| {
+            format!(
+                "{} at {host} returned {status} without the Workers AI envelope: {}",
+                self.model,
+                &text[..text.floor_char_boundary(BODY_PREVIEW_BYTES)]
+            )
+        })?;
         match envelope {
             Envelope {
                 success: true,

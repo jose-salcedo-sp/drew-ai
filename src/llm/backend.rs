@@ -11,17 +11,20 @@
 //! bearer key, and the account id is part of the URL. Its System One is the separate `workers-ai` backend, because
 //! `ai/run` differs from `/v1/systemone` in route, model selector and response envelope.
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use reqwest::Url;
 
 use super::{
     ApiKey, ChatModel, Embedder,
-    bedrock_chat::{BedrockChat, aws_environment},
+    bedrock_chat::{BedrockChat, aws_environment, bedrock_endpoint},
     bedrock_embed::BedrockEmbedder,
-    openai::{ChatOptions, OpenAiChat, OpenAiEmbedder, ReasoningEffort, SchemaFormat},
-    system_one::{HttpSystemOne, SystemOne},
-    workers_ai::{WorkersAiModel, WorkersAiSystemOne},
+    openai::{
+        CHAT_PATH, ChatOptions, EMBEDDINGS_PATH, OpenAiChat, OpenAiEmbedder, ReasoningEffort,
+        SchemaFormat,
+    },
+    system_one::{DECIDE_PATH, HttpSystemOne, SystemOne},
+    workers_ai::{WorkersAiModel, WorkersAiSystemOne, cloudflare_api, run_path},
 };
 
 /// The embedding model and the backend that serves it.
@@ -41,6 +44,10 @@ pub struct EmbedArgs {
     /// `openai-compatible` only: bearer key, e.g. a Workers AI API token.
     #[arg(long, env = "DREW_EMBED_KEY", hide_env_values = true)]
     pub embed_key: Option<ApiKey>,
+    /// `openai-compatible` only: the most estimated tokens one request carries across its texts, for a server whose
+    /// limit spans a request (Workers AI's bge-m3: 60,000; use 50000). Unset: 64 texts a request whatever their size.
+    #[arg(long, env = "DREW_EMBED_MAX_BATCH_TOKENS")]
+    pub embed_max_batch_tokens: Option<NonZeroUsize>,
 }
 
 /// `DREW_EMBED_BACKEND`.
@@ -97,8 +104,8 @@ pub struct SystemOneArgs {
     /// Model: e.g. `kev-latest`, `clef-flash` on system-one.dev, or `@cf/cloudflare/clef-flash` on Workers AI.
     #[arg(long, env = "DREW_SYSTEM_ONE_MODEL")]
     pub system_one_model: Option<String>,
-    /// Server root: required for `system-one`, e.g. `http://127.0.0.1:8009` or `https://system-one.dev`. For
-    /// `workers-ai`, an API root in place of `https://api.cloudflare.com/client/v4`, such as a gateway.
+    /// `system-one` only, and required there: the server root, e.g. `http://127.0.0.1:8009` or
+    /// `https://system-one.dev`.
     #[arg(long, env = "DREW_SYSTEM_ONE_URL")]
     pub system_one_url: Option<Url>,
     /// `workers-ai` only: the Cloudflare account id.
@@ -133,6 +140,33 @@ pub(crate) enum InvalidBackend {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+/// Where a backend sends its requests: scheme, host, port and path. Credentials, query and fragment are dropped, so
+/// it is safe to print.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint(String);
+
+impl Endpoint {
+    /// `path` under `base`, as the adapters build their routes.
+    pub(crate) fn new(base: &Url, path: &str) -> Self {
+        let port = base
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        Self(format!(
+            "{}://{}{port}{}/{path}",
+            base.scheme(),
+            base.host_str().unwrap_or_default(),
+            base.path().trim_end_matches('/'),
+        ))
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The backend selection that settings are checked against.
@@ -173,6 +207,7 @@ pub(crate) enum EmbedBackend {
         url: Url,
         model: String,
         key: Option<ApiKey>,
+        max_batch_tokens: Option<NonZeroUsize>,
     },
 }
 
@@ -188,9 +223,14 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_model,
                     embed_url,
                     embed_key,
+                    embed_max_batch_tokens,
                 } = args;
                 selected.reject(embed_url.as_ref(), "DREW_EMBED_URL")?;
                 selected.reject(embed_key.as_ref(), "DREW_EMBED_KEY")?;
+                selected.reject(
+                    embed_max_batch_tokens.as_ref(),
+                    "DREW_EMBED_MAX_BATCH_TOKENS",
+                )?;
                 Self::Bedrock {
                     model: embed_model.clone(),
                 }
@@ -201,11 +241,13 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_model,
                     embed_url,
                     embed_key,
+                    embed_max_batch_tokens,
                 } = args;
                 Self::OpenAiCompatible {
                     url: selected.require(embed_url.as_ref(), "DREW_EMBED_URL")?,
                     model: embed_model.clone(),
                     key: embed_key.clone(),
+                    max_batch_tokens: *embed_max_batch_tokens,
                 }
             }
         })
@@ -224,13 +266,28 @@ impl EmbedBackend {
         }
     }
 
+    /// Where the embedder posts; `None` on Bedrock with no AWS region.
+    pub(crate) async fn endpoint(&self) -> Option<Endpoint> {
+        match self {
+            Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/invoke")).await,
+            Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, EMBEDDINGS_PATH)),
+        }
+    }
+
     #[eros::context("setting up the embeddings backend")]
     pub(crate) async fn build(self) -> eros::Result<Arc<dyn Embedder>> {
         Ok(match self {
             Self::Bedrock { model } => Arc::new(BedrockEmbedder::load(&model).await?),
-            Self::OpenAiCompatible { url, model, key } => {
-                Arc::new(OpenAiEmbedder::new(&url, model)?.with_key(key))
-            }
+            Self::OpenAiCompatible {
+                url,
+                model,
+                key,
+                max_batch_tokens,
+            } => Arc::new(
+                OpenAiEmbedder::new(&url, model)?
+                    .with_key(key)
+                    .with_max_batch_tokens(max_batch_tokens),
+            ),
         })
     }
 }
@@ -309,6 +366,14 @@ impl ChatBackend {
         }
     }
 
+    /// Where `Explain` posts; `None` on Bedrock with no AWS region.
+    pub(crate) async fn endpoint(&self) -> Option<Endpoint> {
+        match self {
+            Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/converse")).await,
+            Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, CHAT_PATH)),
+        }
+    }
+
     #[eros::context("setting up the Explain backend")]
     pub(crate) async fn build(self) -> eros::Result<Arc<dyn ChatModel>> {
         Ok(match self {
@@ -336,7 +401,6 @@ pub(crate) enum SystemOneBackend {
         key: Option<ApiKey>,
     },
     WorkersAi {
-        api_base: Option<Url>,
         account_id: String,
         model: WorkersAiModel,
         key: ApiKey,
@@ -386,6 +450,7 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                     system_one_account_id,
                     system_one_key,
                 } = args;
+                selected.reject(system_one_url.as_ref(), "DREW_SYSTEM_ONE_URL")?;
                 let model = selected
                     .require(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?
                     .parse()
@@ -396,7 +461,6 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                         }
                     })?;
                 Self::WorkersAi {
-                    api_base: system_one_url.clone(),
                     account_id: selected
                         .require(system_one_account_id.as_ref(), "DREW_SYSTEM_ONE_ACCOUNT_ID")?,
                     model,
@@ -420,6 +484,20 @@ impl SystemOneBackend {
         }
     }
 
+    /// Where System One posts; `None` for [`SystemOneBackend::None`].
+    pub(crate) fn endpoint(&self) -> Option<Endpoint> {
+        match self {
+            Self::None => None,
+            Self::SystemOne { url, .. } => Some(Endpoint::new(url, DECIDE_PATH)),
+            Self::WorkersAi {
+                account_id, model, ..
+            } => Some(Endpoint::new(
+                &cloudflare_api(),
+                &run_path(account_id, model),
+            )),
+        }
+    }
+
     /// `None` for [`SystemOneBackend::None`].
     #[eros::context("setting up the System One backend")]
     pub(crate) fn build(self) -> eros::Result<Option<Arc<dyn SystemOne>>> {
@@ -429,17 +507,10 @@ impl SystemOneBackend {
                 Some(Arc::new(HttpSystemOne::new(&url, model, key)?))
             }
             Self::WorkersAi {
-                api_base,
                 account_id,
                 model,
                 key,
-            } => {
-                let client = WorkersAiSystemOne::new(&account_id, model, key)?;
-                Some(Arc::new(match &api_base {
-                    Some(api_base) => client.with_api_base(api_base),
-                    None => client,
-                }))
-            }
+            } => Some(Arc::new(WorkersAiSystemOne::new(&account_id, model, key)?)),
         })
     }
 }
@@ -614,10 +685,12 @@ mod tests {
             ])
         };
         let cli = workers_ai("@cf/cloudflare/clef-flash");
-        assert!(matches!(
-            SystemOneBackend::try_from(&cli.system_one),
-            Ok(SystemOneBackend::WorkersAi { api_base: None, .. })
-        ));
+        let backend = SystemOneBackend::try_from(&cli.system_one).unwrap();
+        assert!(matches!(backend, SystemOneBackend::WorkersAi { .. }));
+        assert_eq!(
+            backend.endpoint().unwrap().to_string(),
+            "https://api.cloudflare.com/client/v4/accounts/acc/ai/run/@cf/cloudflare/clef-flash"
+        );
         assert!(system_one_client(&cli.system_one).unwrap().is_some());
 
         let error = SystemOneBackend::try_from(&workers_ai("kev-latest").system_one)
@@ -628,6 +701,92 @@ mod tests {
             error.starts_with("DREW_SYSTEM_ONE_MODEL: ")
                 && error.contains("@cf/cloudflare/clef-flash"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn workers_ai_rejects_a_system_one_url_left_over_from_kev() {
+        let cli = parse(&[
+            "--explain-backend",
+            "openai-compatible",
+            "--system-one-backend",
+            "workers-ai",
+            "--system-one-model",
+            "@cf/cloudflare/clef-flash",
+            "--system-one-account-id",
+            "acc",
+            "--system-one-key",
+            "token",
+            "--system-one-url",
+            "http://127.0.0.1:8009",
+        ]);
+        assert_eq!(
+            SystemOneBackend::try_from(&cli.system_one)
+                .err()
+                .unwrap()
+                .to_string(),
+            "DREW_SYSTEM_ONE_URL is set, but DREW_SYSTEM_ONE_BACKEND=workers-ai does not use it; unset it"
+        );
+        assert!(system_one_client(&cli.system_one).is_err());
+    }
+
+    #[test]
+    fn an_endpoint_keeps_scheme_host_port_and_path_only() {
+        let base: Url = "http://user:secret@127.0.0.1:8009/root/?key=secret#frag"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            Endpoint::new(&base, DECIDE_PATH).to_string(),
+            "http://127.0.0.1:8009/root/v1/systemone"
+        );
+        let base: Url = "https://system-one.dev".parse().unwrap();
+        assert_eq!(
+            Endpoint::new(&base, DECIDE_PATH).to_string(),
+            "https://system-one.dev/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn the_embed_batch_budget_is_a_positive_integer_for_openai_compatible_only() {
+        for bad in ["0", "-1", "50k"] {
+            assert!(
+                try_parse(&[
+                    "--explain-backend",
+                    "bedrock",
+                    "--system-one-backend",
+                    "none",
+                    "--embed-max-batch-tokens",
+                    bad,
+                ])
+                .is_err(),
+                "{bad}"
+            );
+        }
+        let mut cli = parse(&[
+            "--explain-backend",
+            "bedrock",
+            "--system-one-backend",
+            "none",
+            "--embed-url",
+            "http://localhost:11434/v1",
+            "--embed-max-batch-tokens",
+            "50000",
+        ]);
+        assert!(matches!(
+            EmbedBackend::try_from(&cli.embed),
+            Ok(EmbedBackend::OpenAiCompatible {
+                max_batch_tokens: Some(budget),
+                ..
+            }) if budget.get() == 50_000
+        ));
+        cli.embed.embed_backend = EmbedBackendKind::Bedrock;
+        cli.embed.embed_url = None;
+        assert_eq!(
+            EmbedBackend::try_from(&cli.embed)
+                .err()
+                .unwrap()
+                .to_string(),
+            "DREW_EMBED_MAX_BATCH_TOKENS is set, but DREW_EMBED_BACKEND=bedrock does not use it; unset it"
         );
     }
 
