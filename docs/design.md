@@ -43,7 +43,7 @@ Ingestion:
 | Language | Rust, single crate, one binary: `drew serve`, `drew ingest`, `drew eval` |
 | Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `server`, `slack`, `eval` |
 | Store | Postgres + pgvector (Docker Compose for the demo; Aurora later, where native RLS covers the security phase) |
-| Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (SAP identifiers like `S_TCODE`, `AGR_USERS` embed poorly) |
+| Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (SAP identifiers like `S_TCODE`, `AGR_USERS` embed poorly). Full text ranks exact identifier matches first, then BM25 in plain SQL over corpus statistics that `drew ingest` refreshes (no extension, so it runs on Aurora) |
 | Embeddings, "why" LLM | Amazon Bedrock (AI Council approved), dev AWS account. For local development, any OpenAI-compatible server (Ollama, llama.cpp), e.g. `bge-m3` and `qwen3:14b` |
 | System One | TypeSafe's System One API (`POST /v1/systemone`): yes/no, choice, and score questions over a text, answered with calibrated probabilities. Served locally by [Kev](https://github.com/jaredpalmer/kev) (MLX on Apple Silicon); a hosted endpoint later is a URL change |
 | Libraries | `axum`, `sqlx`, `pgvector`, `aws-sdk-bedrockruntime`, `reqwest`, `serde` |
@@ -263,7 +263,7 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 - **`drew eval`** reports per step: classification accuracy, retrieval recall@50, rerank hit@5, answer precision, decline rate, citation validity.
 - **CI**: runs on every change to prompts, models, chunking, or thresholds; a regression in any metric fails the build.
 - **Threshold tuning**: re-applies candidate thresholds to persisted runs from their recorded scores, without calling any model. Full replay is out of scope for v1. A candidate's `thresholds` and `per_category` have the same shape as those in `config/drew.json`, so a tuned candidate is pasted in as is.
-- **Configuration**: every tunable (retrieval candidates, `classify.min_confidence`, rerank `top_k`, `candidates` and `evidence_rank_penalty`, step thresholds) is in one JSON file, `config/drew.json` or `DREW_CONFIG`. Unknown keys are rejected. `drew eval run` prints it with the models in use and records both, with the git revision, in the results file.
+- **Configuration**: every tunable (retrieval candidates and BM25 `k1`/`b`, `classify.min_confidence`, rerank `top_k`, `candidates` and `evidence_rank_penalty`, step thresholds) is in one JSON file, `config/drew.json` or `DREW_CONFIG`. Unknown keys are rejected. `drew eval run` prints it with the models in use and records both, with the git revision, in the results file.
 - **Launch gate** (opening beyond the 4 users): answered precision ≥ 95% and decline rate ≤ ~40%. Until then v1 is the shadow phase, with Drew reviewing.
 - **Feedback loop**: declined and thumbs-down answers go to Drew's review queue. His corrections are ingested as authoritative chunks, and the question joins the golden set.
 

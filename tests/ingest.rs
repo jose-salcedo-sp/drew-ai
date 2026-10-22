@@ -355,6 +355,54 @@ async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
     );
 }
 
+/// `(chunks, avg_length)` of the corpus statistics, and the document frequency of each lexeme in `lexemes`.
+async fn term_stats(pool: &PgPool, lexemes: &[&str]) -> ((i64, Option<f64>), Vec<Option<i32>>) {
+    let corpus = sqlx::query_as("SELECT chunks, avg_length FROM fts_prose_corpus")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let frequencies = sqlx::query_scalar(
+        "SELECT t.chunks FROM unnest($1::text[]) WITH ORDINALITY l(lexeme, i)
+         LEFT JOIN fts_prose_terms t USING (lexeme) ORDER BY i",
+    )
+    .bind(lexemes)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    (corpus, frequencies)
+}
+
+#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
+    assert_eq!(term_stats(&pool, &["role"]).await, ((0, None), vec![None]));
+
+    // Headings are the uppercased locators, so `role` is in every chunk.
+    let sources = [static_source(vec![
+        document(SourceKind::Markdown, "a.md", &[("role", "payroll payroll")]),
+        document(
+            SourceKind::Markdown,
+            "b.md",
+            &[("role", "role owners review")],
+        ),
+    ])];
+    ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    assert_eq!(
+        term_stats(&pool, &["role", "payrol", "owner"]).await,
+        ((2, Some(3.5)), vec![Some(2), Some(1), Some(1)])
+    );
+
+    let sources = [static_source(vec![document(
+        SourceKind::Markdown,
+        "b.md",
+        &[("role", "role owners review")],
+    )])];
+    ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    assert_eq!(
+        term_stats(&pool, &["role", "payrol", "owner"]).await,
+        ((1, Some(4.0)), vec![Some(1), None, Some(1)])
+    );
+}
+
 #[sqlx::test(migrator = "drew::store::MIGRATOR")]
 async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
     let sources = [

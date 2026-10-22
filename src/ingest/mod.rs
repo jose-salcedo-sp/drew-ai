@@ -108,11 +108,14 @@ pub struct SourceReport {
 /// Ingests every source independently: a failing source does not stop the others; its error is in its report.
 ///
 /// With `reembed`, and only when every source succeeded, chunks embedded with any other model are superseded too.
+/// Last, the full-text statistics that BM25 ranking reads are recomputed from the current chunks, in their own
+/// transaction: each document commits separately, so there is no snapshot transaction to join, and until the refresh
+/// commits retrieval ranks with the previous statistics.
 ///
 /// # Errors
 ///
 /// [`EmbeddingModelMismatch`], before touching any source, when current chunks use another model and `reembed` is
-/// off; [`sqlx::Error`] when the model check or the final supersede fails.
+/// off; [`sqlx::Error`] when the model check, the final supersede, or the statistics refresh fails.
 pub async fn ingest(
     pool: &PgPool,
     embedder: &dyn Embedder,
@@ -173,6 +176,8 @@ pub async fn ingest(
             );
         }
     }
+    // A failed source may have stored some documents before failing, so the statistics are refreshed regardless.
+    store.refresh_term_stats().await.widen()?;
     Ok(reports)
 }
 
