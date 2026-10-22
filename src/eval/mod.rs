@@ -24,7 +24,7 @@ use chrono::Utc;
 
 use crate::{
     config::ConfigArgs,
-    llm::{self, bedrock_embed::EmbedArgs},
+    llm::{self, backend::EmbedArgs},
     pipeline::{
         answerer::{PipelineAnswerer, PipelineArgs},
         report::Answerer,
@@ -52,9 +52,9 @@ pub struct Args {
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Answer every golden question and report per-step metrics.
-    Run(RunCommand),
+    Run(Box<RunCommand>),
     /// Run only Retrieve on every golden question and report recall, per question against a baseline.
-    Retrieval(RetrievalCommand),
+    Retrieval(Box<RetrievalCommand>),
     /// Re-apply candidate thresholds to a results file's recorded scores.
     Tune(TuneArgs),
 }

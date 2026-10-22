@@ -3,8 +3,9 @@
 //! LLM answers the "why". Every claim cites its source, and every run, answered, declined or failed, is persisted
 //! with its full trace. The design is in [`docs/design.md`]; read the section for a module before changing it.
 //!
-//! One binary serves three commands: `drew ingest` loads the corpus, `drew serve` runs the OpenAI-compatible HTTP
-//! API and the Slack bot, and `drew eval` measures each step against a golden set.
+//! One binary serves four commands: `drew ingest` loads the corpus, `drew serve` runs the OpenAI-compatible HTTP
+//! API and the Slack bot, `drew eval` measures each step against a golden set, and `drew models check` calls each
+//! model backend once.
 //!
 //! # Pipeline
 //!
@@ -29,9 +30,9 @@
 //! | Port | Production adapter |
 //! |---|---|
 //! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory, the only corpus source |
-//! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server, chosen by [`llm::embedder`] |
-//! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server, chosen by [`llm::explain_model`] |
-//! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev) |
+//! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
+//! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
+//! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
 //! | [`pipeline::report::Answerer`] | [`pipeline::answerer::PipelineAnswerer`] |
@@ -53,6 +54,7 @@ pub mod domain;
 pub mod eval;
 pub mod ingest;
 pub mod llm;
+pub mod models;
 pub mod pipeline;
 pub mod retrieval;
 pub mod server;

@@ -1,61 +1,151 @@
-//! `ChatModel` and `Embedder` over an OpenAI-compatible HTTP API: Ollama, vLLM, or llama.cpp.
+//! `ChatModel` and `Embedder` over an OpenAI-compatible HTTP API: Ollama, vLLM, llama.cpp, or Workers AI
+//! (`https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1`, with a bearer key).
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use eros::{Context, bail, ensure};
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    ChatModel, ChatRequest, ChatResponse, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
+    ApiKey, ChatModel, ChatRequest, ChatResponse, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
 };
 
-/// A local 14B model can take a minute to write a long structured answer.
-const TIMEOUT: Duration = Duration::from_secs(300);
+/// A local 14B model can take a minute to write a long structured answer, and a hosted reasoning model longer.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const EMBED_BATCH: usize = 64;
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .build()
-        .expect("a client with only a timeout set always builds")
+#[eros::context("building the OpenAI-compatible HTTP client")]
+fn client() -> eros::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()?)
 }
 
-fn endpoint(base_url: &str, path: &str) -> String {
-    format!("{}/{path}", base_url.trim_end_matches('/'))
+fn endpoint(base_url: &Url, path: &str) -> String {
+    format!("{}/{path}", base_url.as_str().trim_end_matches('/'))
 }
 
-#[eros::context("POST {}", url)]
-async fn post(client: &reqwest::Client, url: &str, body: &Value) -> eros::Result<Value> {
-    let response = client.post(url).json(body).send().await?;
+#[eros::context("POST {} for model {}", url, model)]
+async fn post(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    key: Option<&ApiKey>,
+    body: &Value,
+) -> eros::Result<Value> {
+    let mut post = client.post(url).json(body);
+    if let Some(key) = key {
+        post = post.bearer_auth(key.expose());
+    }
+    let response = post.send().await?;
     let status = response.status();
     let text = response.text().await?;
-    ensure!(status.is_success(), "returned {status}: {text}");
+    ensure!(status.is_success(), "{model} returned {status}: {text}");
     Ok(serde_json::from_str(&text)?)
 }
 
-/// [`ChatModel`] over `POST {base_url}/chat/completions`. A request schema becomes a strict `json_schema`
-/// response format.
-pub struct OpenAiChat {
-    client: reqwest::Client,
-    base_url: String,
-    model: String,
+/// How much a reasoning model thinks before answering, sent as `reasoning_effort`. The levels are those of
+/// `@cf/qwen/qwen3.8-27b` on Workers AI, whose default is `xhigh`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReasoningEffort {
+    /// Fastest. On Workers AI, `low` with a `json_schema` response format hangs until the 120 s gateway timeout
+    /// (cloudflare/workers-sdk#16165), so `Explain`, which always sends a schema, should use `medium`.
+    Low,
+    /// The recommended level for `Explain`.
+    Medium,
+    /// The model's default; the slowest, and the most reasoning tokens out of `max_tokens`.
+    Xhigh,
 }
 
-impl OpenAiChat {
-    /// `base_url` includes the API prefix, e.g. `http://localhost:11434/v1` for Ollama.
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            client: client(),
-            base_url: base_url.into(),
-            model: model.into(),
+impl ReasoningEffort {
+    /// The wire value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::Xhigh => "xhigh",
         }
     }
 }
 
+/// How a request schema is written into `response_format.json_schema`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum SchemaFormat {
+    /// OpenAI's `{"name": "respond", "strict": true, "schema": ...}`.
+    #[default]
+    Openai,
+    /// The schema itself, as Workers AI's JSON Mode documentation writes it, for a server that rejects OpenAI's form.
+    Bare,
+}
+
+/// Request options that shape the output, so they are part of the [`ModelRef`] version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChatOptions {
+    /// `None`: no `reasoning_effort` is sent, and the server's default applies.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// How a request schema is sent.
+    pub schema_format: SchemaFormat,
+}
+
+impl ChatOptions {
+    /// `openai-compatible`, then each option that is not the default, e.g. `;reasoning_effort=medium`.
+    fn version(self) -> String {
+        let mut version = String::from("openai-compatible");
+        if let Some(effort) = self.reasoning_effort {
+            version.push_str(";reasoning_effort=");
+            version.push_str(effort.as_str());
+        }
+        match self.schema_format {
+            SchemaFormat::Openai => {}
+            SchemaFormat::Bare => version.push_str(";schema=bare"),
+        }
+        version
+    }
+}
+
+/// [`ChatModel`] over `POST {base_url}/chat/completions`. A request schema becomes a `json_schema` response format.
+pub struct OpenAiChat {
+    client: reqwest::Client,
+    url: String,
+    model: String,
+    key: Option<ApiKey>,
+    options: ChatOptions,
+}
+
+impl OpenAiChat {
+    /// `base_url` includes the API prefix, e.g. `http://localhost:11434/v1` for Ollama. No key, default options.
+    ///
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
+    pub fn new(base_url: &Url, model: impl Into<String>) -> eros::Result<Self> {
+        Ok(Self {
+            client: client()?,
+            url: endpoint(base_url, "chat/completions"),
+            model: model.into(),
+            key: None,
+            options: ChatOptions::default(),
+        })
+    }
+
+    /// Sends `key` as a bearer token, when set.
+    pub fn with_key(self, key: Option<ApiKey>) -> Self {
+        Self { key, ..self }
+    }
+
+    /// See [`ChatOptions`].
+    pub fn with_options(self, options: ChatOptions) -> Self {
+        Self { options, ..self }
+    }
+}
+
 /// The `chat/completions` request body.
-pub fn chat_body(model: &str, request: &ChatRequest) -> Value {
+pub fn chat_body(model: &str, request: &ChatRequest, options: ChatOptions) -> Value {
     let mut body = json!({
         "model": model,
         "messages": [
@@ -65,40 +155,60 @@ pub fn chat_body(model: &str, request: &ChatRequest) -> Value {
         "max_tokens": request.max_tokens,
         "temperature": request.temperature,
     });
+    if let Some(effort) = options.reasoning_effort {
+        body["reasoning_effort"] = json!(effort.as_str());
+    }
     if let Some(schema) = &request.json_schema {
-        body["response_format"] = json!({
-            "type": "json_schema",
-            "json_schema": { "name": "respond", "strict": true, "schema": schema },
-        });
+        let json_schema = match options.schema_format {
+            SchemaFormat::Openai => json!({ "name": "respond", "strict": true, "schema": schema }),
+            SchemaFormat::Bare => schema.clone(),
+        };
+        body["response_format"] = json!({ "type": "json_schema", "json_schema": json_schema });
     }
     body
 }
 
-/// The first choice's content, without the `<think>` block reasoning models such as Qwen3 may prepend.
+/// The first choice's `content`, without any reasoning. Reasoning sent in its own field (`reasoning`,
+/// `reasoning_content`) is never read; reasoning inlined as a `<think>` block, or ending at a bare `</think>` when
+/// the chat template opened the block, is dropped.
 ///
 /// # Errors
 ///
-/// When the response has no `choices[0].message.content` string.
+/// When the response has no `choices[0].message.content` string, as when a reasoning model spends all of
+/// `max_tokens` reasoning (`finish_reason` `length`).
 pub fn chat_text(response: &Value) -> eros::Result<String> {
-    let content = response["choices"][0]["message"]["content"]
-        .as_str()
-        .context("response has no choices[0].message.content")?;
-    let content = match content.trim_start().strip_prefix("<think>") {
-        Some(rest) => rest.split_once("</think>").map_or("", |(_, answer)| answer),
+    let choice = &response["choices"][0];
+    let Some(content) = choice["message"]["content"].as_str() else {
+        let finish = choice["finish_reason"].as_str().unwrap_or("absent");
+        bail!(
+            "response has no choices[0].message.content (finish_reason {finish}); on a reasoning model \
+             max_tokens also bounds the reasoning, so `length` means it ran out before answering"
+        );
+    };
+    let answer = match content.rsplit_once("</think>") {
+        Some((_, answer)) => answer,
+        None if content.trim_start().starts_with("<think>") => "",
         None => content,
     };
-    Ok(content.trim().to_owned())
+    Ok(answer.trim().to_owned())
 }
 
 #[async_trait]
 impl ChatModel for OpenAiChat {
     fn model(&self) -> ModelRef {
-        ModelRef::new(&self.model, "openai-compatible")
+        ModelRef::new(&self.model, self.options.version())
     }
 
     async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse> {
-        let url = endpoint(&self.base_url, "chat/completions");
-        let response = post(&self.client, &url, &chat_body(&self.model, &request)).await?;
+        let body = chat_body(&self.model, &request, self.options);
+        let response = post(
+            &self.client,
+            &self.url,
+            &self.model,
+            self.key.as_ref(),
+            &body,
+        )
+        .await?;
         Ok(ChatResponse {
             text: chat_text(&response)?,
             mean_logprob: None,
@@ -109,18 +219,30 @@ impl ChatModel for OpenAiChat {
 /// [`Embedder`] over `POST {base_url}/embeddings`, in batches of 64. Ignores [`EmbedPurpose`].
 pub struct OpenAiEmbedder {
     client: reqwest::Client,
-    base_url: String,
+    url: String,
     model: String,
+    key: Option<ApiKey>,
 }
 
 impl OpenAiEmbedder {
-    /// The model must produce `EMBEDDING_DIM` dimensions, e.g. `bge-m3` or `mxbai-embed-large` in Ollama.
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            client: client(),
-            base_url: base_url.into(),
+    /// The model must produce `EMBEDDING_DIM` dimensions, e.g. `bge-m3` in Ollama or `@cf/baai/bge-m3` on Workers
+    /// AI. No key.
+    ///
+    /// # Errors
+    ///
+    /// When the HTTP client cannot be built.
+    pub fn new(base_url: &Url, model: impl Into<String>) -> eros::Result<Self> {
+        Ok(Self {
+            client: client()?,
+            url: endpoint(base_url, "embeddings"),
             model: model.into(),
-        }
+            key: None,
+        })
+    }
+
+    /// Sends `key` as a bearer token, when set.
+    pub fn with_key(self, key: Option<ApiKey>) -> Self {
+        Self { key, ..self }
     }
 }
 
@@ -167,11 +289,17 @@ impl Embedder for OpenAiEmbedder {
     }
 
     async fn embed(&self, texts: &[String], _purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
-        let url = endpoint(&self.base_url, "embeddings");
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in texts.chunks(EMBED_BATCH) {
             let body = json!({ "model": self.model, "input": batch });
-            let response = post(&self.client, &url, &body).await?;
+            let response = post(
+                &self.client,
+                &self.url,
+                &self.model,
+                self.key.as_ref(),
+                &body,
+            )
+            .await?;
             vectors.extend(embeddings(&response, batch.len())?);
         }
         Ok(vectors)
@@ -200,27 +328,64 @@ mod tests {
     #[test]
     fn a_schema_becomes_a_json_schema_response_format() {
         let schema = json!({ "type": "object" });
-        let body = chat_body("qwen3:14b", &request(Some(schema.clone())));
+        let body = chat_body(
+            "qwen3:14b",
+            &request(Some(schema.clone())),
+            ChatOptions::default(),
+        );
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["response_format"]["json_schema"]["schema"], schema);
         assert_eq!(body["messages"][0]["role"], "system");
         assert!(
-            chat_body("qwen3:14b", &request(None))
+            chat_body("qwen3:14b", &request(None), ChatOptions::default())
                 .get("response_format")
                 .is_none()
         );
     }
 
     #[test]
-    fn a_think_block_is_dropped() {
+    fn options_that_shape_the_output_are_in_the_version() {
+        assert_eq!(ChatOptions::default().version(), "openai-compatible");
+        let options = ChatOptions {
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            schema_format: SchemaFormat::Bare,
+        };
+        assert_eq!(
+            options.version(),
+            "openai-compatible;reasoning_effort=medium;schema=bare"
+        );
+    }
+
+    #[test]
+    fn reasoning_never_reaches_the_answer() {
         let response =
             |content: &str| json!({ "choices": [{ "message": { "content": content } }] });
         assert_eq!(
             chat_text(&response("<think>\nhmm\n</think>\n{\"claims\": []}")).unwrap(),
             "{\"claims\": []}"
         );
+        assert_eq!(
+            chat_text(&response("the template opened it\n</think>\n{\"a\": 1}")).unwrap(),
+            "{\"a\": 1}"
+        );
         assert_eq!(chat_text(&response(" {\"a\": 1} ")).unwrap(), "{\"a\": 1}");
         assert_eq!(chat_text(&response("<think>never closed")).unwrap(), "");
+        let separate = json!({ "choices": [{ "message": {
+            "content": "{\"a\": 1}", "reasoning": "hmm", "reasoning_content": "hmm"
+        } }] });
+        assert_eq!(chat_text(&separate).unwrap(), "{\"a\": 1}");
+    }
+
+    #[test]
+    fn reasoning_that_used_up_max_tokens_names_the_cause() {
+        let response = json!({ "choices": [{
+            "message": { "content": null, "reasoning": "hmm" }, "finish_reason": "length"
+        }] });
+        let error = format!("{:#?}", chat_text(&response).unwrap_err());
+        assert!(
+            error.contains("finish_reason length") && error.contains("max_tokens"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -236,13 +401,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let chat = OpenAiChat::new(format!("{}/v1/", server.uri()), "qwen3:14b");
+        let chat = OpenAiChat::new(
+            &format!("{}/v1/", server.uri()).parse().unwrap(),
+            "qwen3:14b",
+        )
+        .unwrap();
         let response = chat.complete(request(Some(json!({})))).await.unwrap();
         assert_eq!(response.text, "{\"claims\": []}");
     }
 
     #[tokio::test]
-    async fn errors_carry_the_status_and_body() {
+    async fn errors_carry_the_status_and_body_but_never_the_key() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
@@ -251,11 +420,18 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = OpenAiChat::new(server.uri(), "qwen3:14b")
+        let error = OpenAiChat::new(&server.uri().parse().unwrap(), "qwen3:14b")
+            .unwrap()
+            .with_key(Some("sk-secret".parse().unwrap()))
             .complete(request(None))
             .await
             .unwrap_err();
-        assert!(format!("{error:#?}").contains("not found"), "{error:#?}");
+        let report = format!("{error:?}");
+        assert!(
+            report.contains("not found") && report.contains("for model qwen3:14b"),
+            "{report}"
+        );
+        assert!(!report.contains("sk-secret"), "{report}");
     }
 
     #[tokio::test]
@@ -274,7 +450,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let embedder = OpenAiEmbedder::new(format!("{}/v1", server.uri()), "bge-m3");
+        let embedder =
+            OpenAiEmbedder::new(&format!("{}/v1", server.uri()).parse().unwrap(), "bge-m3")
+                .unwrap();
         let vectors = embedder
             .embed(&["a".into(), "b".into()], EmbedPurpose::Document)
             .await

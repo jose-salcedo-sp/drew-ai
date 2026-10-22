@@ -12,6 +12,7 @@ mod runs;
 mod bedrock;
 mod chat_model;
 mod embedder;
+mod models_check;
 mod retriever;
 mod run_store;
 mod slack;

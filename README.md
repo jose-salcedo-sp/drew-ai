@@ -17,7 +17,7 @@ What works today:
 - The `open` path end to end: retrieve, rerank, explain with an LLM, verify every citation.
 - OpenAI-compatible HTTP API, run persistence with full traces (trace on `GET /v1/runs/{id}`, not in chat responses).
 - Optional Slack bot when `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are set.
-- `drew eval` and local or Bedrock models.
+- `drew eval`, and local, hosted (Cloudflare Workers AI) or Bedrock models; `drew models check` calls each one once.
 
 Yes/no questions get a verdict: Kev answers yes or no over the reranked sources, the LLM explains why, and the run declines when the sources contradict the verdict or Kev is not confident enough. A classification below `classify.min_confidence` falls back to `open`.
 
@@ -137,12 +137,39 @@ The bot replies in threads on `@mentions` and in DMs. Runs are stored as user `s
 
 Switching embedding models requires `drew ingest --reembed`.
 
+### Running on hosted models
+
+Every model can run on [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/) with one API token: Explain on `@cf/qwen/qwen3.8-27b`, embeddings on `@cf/baai/bge-m3` (1024 dimensions), and System One on Clef Flash, `@cf/cloudflare/clef-flash`. Uncomment the "Hosted" block in `.env.example` (and comment out the local one), fill in the account id and token, then:
+
+```sh
+docker compose up -d --wait db-hosted   # its own database on port 5434; the hosted block's DATABASE_URL points at it
+set -a; source .env; set +a        # in a fresh shell, so no variable from the old block lingers
+cargo run -- models check          # one call to each model: its model id, latency, and ok or the full error
+cargo run -- ingest                # a fresh corpus embedded by the hosted model; `db` keeps the local one
+cargo run -- eval run --golden eval/golden/daas.jsonl --out eval/results/daas-workers-ai.json --concurrency 2
+cargo run -- eval tune --results eval/results/daas-workers-ai.json --candidates candidates.json
+```
+
+`drew models check` exits non-zero when any backend fails. It names Bedrock, with its AWS region and credentials provider, whenever a port is on Bedrock, so a wrong `.env` is obvious before a long run.
+
+Re-tune the thresholds: Clef Flash is calibrated differently from Kev, so the `classify.min_confidence` and `answer` thresholds in `config/drew.json` were tuned for another model's probabilities. `drew eval tune` re-applies candidate thresholds to the new run's recorded scores without calling any model; paste the best candidate into the config.
+
+What the configuration relies on:
+
+- **Chat and embeddings** use Workers AI's [OpenAI-compatible endpoints](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/), base `https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1` with `Authorization: Bearer <token>`. The wire format is the same as Ollama's, so the backend is `openai-compatible` with `DREW_*_URL` and `DREW_*_KEY`.
+- **Reasoning effort.** [qwen3.8-27b](https://developers.cloudflare.com/workers-ai/models/qwen3.8-27b/) takes `reasoning_effort` `low`, `medium` or `xhigh` (the default). `DREW_EXPLAIN_REASONING_EFFORT` sends it only when set. Use `medium`: `low` with a `json_schema` response format, which Explain always sends, [times out at 120 s](https://github.com/cloudflare/workers-sdk/issues/16165).
+- **`max_tokens` includes the reasoning** on a reasoning model, and Explain's budget is 2,048 tokens. A reply whose reasoning used it all fails with `finish_reason length`. Reasoning never reaches the answer: a separate `reasoning` field is not read, and a `<think>` block is dropped.
+- **Schema shape.** Drew sends OpenAI's `response_format.json_schema` form, `{name, strict, schema}`. Workers AI's [JSON Mode documentation](https://developers.cloudflare.com/workers-ai/features/json-mode/) shows the bare schema instead; if Workers AI rejects or ignores the OpenAI form, set `DREW_EXPLAIN_SCHEMA_FORMAT=bare`.
+- **Clef Flash** ([model page](https://developers.cloudflare.com/workers-ai/models/clef-flash/)) answers the System One request at `POST .../accounts/{ACCOUNT_ID}/ai/run/@cf/cloudflare/clef-flash`, with `model` set to `clef-flash`, inside Workers AI's `{result, success, errors, messages}` envelope. Its context is 24,576 tokens, and a longer text state is truncated to fit without an error. Drew caps a state at 16,000 characters and logs a warning when a request's input tokens come within 512 of the limit. It costs $0.038 per million input tokens, and output is free.
+- **system-one.dev** hosts Clef Flash too, behind the System One API (`POST https://system-one.dev/v1/systemone`, bearer key, 120 decision requests a minute by default, model `clef-flash` per `GET https://system-one.dev/v1/models`; [API docs](https://docs.system-one.dev/en/docs/api)). Use the commented alternative in `.env.example`.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `drew serve` | OpenAI API plus optional Slack bot |
 | `drew ingest` | Snapshot ingest from `DREW_DOCS_DIR`; `--reembed` after changing the embedding model |
+| `drew models check` | One call to the embedder, the Explain LLM and System One, with the same arguments as `serve` and `eval run`; prints each model, latency and outcome, and exits non-zero when any fails |
 | `drew eval run …` / `drew eval tune …` | Golden-set metrics and threshold tuning. `eval/golden/daas.jsonl` holds DaaS's own golden questions (`_ops/EVAL.md`, held out of the corpus): `drew eval run --golden eval/golden/daas.jsonl --out eval/results/daas.json --concurrency 2`. `--question daas-q13` (repeatable, or comma-separated) runs only those questions; with `--baseline`, the baseline is compared on the same questions |
 | `cargo eval-misses` | The eight DaaS questions whose relevant chunks retrieval missed at `4ebe407`, compared against that run (`eval/results/daas-2026-10-21-v4.json`). Run it before the full golden set when changing retrieval. Output goes to `eval/results/retrieval-misses.json` (gitignored); extra `--question` ids are appended to the set |
 | `drew eval retrieval …` / `cargo eval-retrieval` | Runs only Retrieve (embedder and database; no System One, no LLM) on the golden set and prints recall@10 and recall@50 per question and per category. Recall counts matches only, not the neighbouring sections added as context. `--baseline` takes an `eval run` or `eval retrieval` results file and lists each question as gained, lost or unchanged; a lost question exits non-zero. The alias runs all DaaS questions against `eval/results/daas-retrieval-2026-10-22-bm25.json` (retrieval at `6752079`, with BM25: recall@10 68.1%, recall@50 86.2%; before BM25, `daas-retrieval-2026-10-22.json`: 61.2% and 79.3%), not the v4 full run that `cargo eval-misses` uses, since v4 predates `context_for` and counts context chunks; it writes `eval/results/retrieval.json` (gitignored) |
@@ -158,7 +185,15 @@ Tunables (retrieval, the Classify fallback, Rerank, step thresholds) are in [`co
 
 On the 2026-10-22 DaaS run (`eval/results/daas-2026-10-22-v5.json`) System One reranking cost about 40 s and 25 System One calls per question for hit@5 43/58 against 41/58 in retrieval order, and was worse on yes/no questions (7/15 against 10/15), so it is off.
 
-See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), model URLs, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
+See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), the model backends below, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
+
+Each model port names its backend, with no default. A backend's missing or unparsable setting (a URL is checked when parsed), or a setting it does not use, is a startup error naming the variable. Keys are never printed.
+
+| Port | Backends | Variables |
+|---|---|---|
+| Embeddings | `bedrock`, `openai-compatible` (Ollama, Workers AI) | `DREW_EMBED_BACKEND`, `DREW_EMBED_MODEL`; `openai-compatible`: `DREW_EMBED_URL`, optional `DREW_EMBED_KEY` |
+| Explain | `bedrock`, `openai-compatible` (Ollama, Workers AI) | `DREW_EXPLAIN_BACKEND`, `DREW_EXPLAIN_MODEL`; `openai-compatible`: `DREW_EXPLAIN_URL`, optional `DREW_EXPLAIN_KEY`, `DREW_EXPLAIN_REASONING_EFFORT` (`low`, `medium`, `xhigh`), `DREW_EXPLAIN_SCHEMA_FORMAT` (`openai`, `bare`) |
+| System One | `none`, `system-one` (Kev, system-one.dev), `workers-ai` (Clef) | `DREW_SYSTEM_ONE_BACKEND`; `system-one`: `DREW_SYSTEM_ONE_URL`, `DREW_SYSTEM_ONE_MODEL`, optional `DREW_SYSTEM_ONE_KEY`; `workers-ai`: `DREW_SYSTEM_ONE_ACCOUNT_ID`, `DREW_SYSTEM_ONE_MODEL`, `DREW_SYSTEM_ONE_KEY`, optional `DREW_SYSTEM_ONE_URL` (an API root in place of Cloudflare's, such as a gateway) |
 
 ## Code layout
 

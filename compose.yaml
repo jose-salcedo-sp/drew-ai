@@ -1,3 +1,5 @@
+name: drew-ai
+
 services:
   db:
     image: pgvector/pgvector:pg17
@@ -14,5 +16,25 @@ services:
       interval: 2s
       retries: 15
 
+  # The corpus embedded by the hosted models. Chunks record their embedding model and are never mixed, so the
+  # hosted setup gets its own database instead of reembedding `db`. Start it with
+  # `docker compose up -d --wait db-hosted`.
+  db-hosted:
+    profiles: [hosted]
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: drew
+      POSTGRES_PASSWORD: drew
+      POSTGRES_DB: drew
+    ports:
+      - "5434:5432"
+    volumes:
+      - db-hosted:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "drew"]
+      interval: 2s
+      retries: 15
+
 volumes:
   db:
+  db-hosted:

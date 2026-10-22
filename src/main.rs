@@ -1,9 +1,9 @@
-//! The `drew` binary: parses the command line and runs `serve`, `ingest` or `eval` from the library.
+//! The `drew` binary: parses the command line and runs `serve`, `ingest`, `eval` or `models` from the library.
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use drew::{eval, ingest, server};
+use drew::{eval, ingest, models, server};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -24,6 +24,8 @@ enum Command {
     Ingest(ingest::Args),
     /// Run the golden set and report per-step metrics.
     Eval(eval::Args),
+    /// Check each model backend with one call.
+    Models(models::Args),
 }
 
 /// Reports a failure once, with its causes and context; set `RUST_BACKTRACE=1` for the backtrace too.
@@ -37,6 +39,7 @@ async fn main() -> ExitCode {
         Command::Serve(args) => server::run(args).await,
         Command::Ingest(args) => ingest::run(args).await,
         Command::Eval(args) => eval::run(args).await,
+        Command::Models(args) => models::run(args).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

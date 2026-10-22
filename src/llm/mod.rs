@@ -1,42 +1,62 @@
 //! Model clients behind ports: [`Embedder`] for embeddings and [`ChatModel`] for the "why" LLM (Bedrock, or any
-//! OpenAI-compatible server such as Ollama), and [`system_one::SystemOne`] for the "what" (Kev). This module owns
-//! wire formats, timeouts and backend selection; prompts belong to the pipeline steps that send them.
+//! OpenAI-compatible server such as Ollama or Workers AI), and [`system_one::SystemOne`] for the "what" (Kev,
+//! system-one.dev, or Clef on Workers AI). This module owns wire formats, timeouts and backend selection; prompts
+//! belong to the pipeline steps that send them.
 
+pub mod backend;
 pub mod bedrock_chat;
 pub mod bedrock_embed;
 #[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod openai;
 pub mod system_one;
+pub mod workers_ai;
 
-use std::sync::Arc;
+use std::{fmt, str::FromStr};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use self::{
-    bedrock_chat::{BedrockChat, ChatArgs},
-    bedrock_embed::{BedrockEmbedder, EmbedArgs},
-    openai::{OpenAiChat, OpenAiEmbedder},
-};
+pub use self::backend::{embedder, explain_model, system_one_client};
 
-/// An OpenAI-compatible server when `--embed-url` is set, Bedrock otherwise.
-///
-/// # Errors
-///
-/// On Bedrock, when the model is not Titan Text Embeddings v2 or Cohere Embed v3.
-pub async fn embedder(args: &EmbedArgs) -> eros::Result<Arc<dyn Embedder>> {
-    Ok(match &args.embed_url {
-        Some(url) => Arc::new(OpenAiEmbedder::new(url, &args.embed_model)),
-        None => Arc::new(BedrockEmbedder::from_args(args).await?),
-    })
+/// A non-empty bearer token. `Debug` and `Display` hide it, so formatting a config, a client or an error cannot
+/// print it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApiKey(String);
+
+impl ApiKey {
+    /// The token, for the `Authorization` header only.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
 }
 
-/// An OpenAI-compatible server when `--explain-url` is set, Bedrock otherwise.
-pub async fn explain_model(args: &ChatArgs) -> Arc<dyn ChatModel> {
-    match &args.explain_url {
-        Some(url) => Arc::new(OpenAiChat::new(url, &args.explain_model)),
-        None => Arc::new(BedrockChat::from_args(args).await),
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ApiKey(<hidden>)")
+    }
+}
+
+impl fmt::Display for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<hidden>")
+    }
+}
+
+/// An empty key, as from `DREW_EXPLAIN_KEY=` in an env file; unset the variable instead.
+#[derive(Debug, thiserror::Error)]
+#[error("the key is empty; unset the variable to send no key")]
+pub struct EmptyApiKey;
+
+impl FromStr for ApiKey {
+    type Err = EmptyApiKey;
+
+    fn from_str(key: &str) -> Result<Self, Self::Err> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(EmptyApiKey);
+        }
+        Ok(Self(key.to_owned()))
     }
 }
 
@@ -93,7 +113,8 @@ pub struct ChatRequest {
     pub system: String,
     /// The question and the delimited sources.
     pub user: String,
-    /// Upper bound on generated tokens.
+    /// Upper bound on generated tokens. On a reasoning model (Qwen3, `@cf/qwen/qwen3.8-27b`) it also bounds the
+    /// reasoning, which is generated first, so a high reasoning effort can spend it all before the answer.
     pub max_tokens: u32,
     /// Sampling temperature; `0.0` for the most deterministic output.
     pub temperature: f32,
@@ -120,4 +141,19 @@ pub trait ChatModel: Send + Sync {
     ///
     /// When the backend fails, times out, or returns no text.
     async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_never_formats_its_secret() {
+        let key: ApiKey = " cf-secret-token ".parse().unwrap();
+        assert_eq!(key.expose(), "cf-secret-token");
+        for shown in [format!("{key:?}"), format!("{key:#?}"), key.to_string()] {
+            assert!(!shown.contains("cf-secret-token"), "{shown}");
+        }
+        assert!("  ".parse::<ApiKey>().is_err());
+    }
 }
