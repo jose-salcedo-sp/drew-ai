@@ -40,7 +40,7 @@ golden file as the argument (`grep_probe.py` also reads `DREW_DOCS_DIR`). The re
   without Kev, counting the golden questions (of 58) with a relevant chunk found:
   in the top 50: current 50, BM25 53, BM25 with 150 candidates and the cross-encoder 56;
   in the top 5: current 37, BM25 43, cross-encoder 45 (loses q13, q17, q42, q59, q60).
-  About 9.2 s per question on a local machine, far above Kev; only worth revisiting on a GPU or hosted.
+  About 9.2 s per question on a local machine (see enrichment.md section 4), far above Kev; only worth revisiting on a GPU or hosted.
 - Contextual prefixes per chunk (Anthropic Contextual Retrieval): better vector rank for 5 of 8 misses, worse
   for 3. Reingest.
 - One chunk per table row: q50 vector rank 322 -> 127. Reingest.
