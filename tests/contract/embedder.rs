@@ -157,19 +157,194 @@ mod openai {
 
     embedder_contract!(openai);
 
-    mod workers_ai_shaped {
+    mod workers_ai {
+        use drew::llm::{
+            ModelRef,
+            workers_ai::{WorkersAiEmbedModel, WorkersAiEmbedder},
+        };
+        use wiremock::Respond;
+
         use super::*;
 
-        /// `@cf/baai/bge-m3` on Workers AI's OpenAI-compatible route, with its API token.
+        const ROUTE: &str = "/client/v4/accounts/acc-123/ai/v1/embeddings";
+        const BGE_M3_LIMIT: usize = 60_000;
+
+        /// Workers AI as it counts a request: every input padded to the longest, here at 3 bytes a token. Over the
+        /// limit it answers with its envelope, as it did for `canon/LIMITS.md`.
+        struct BgeM3;
+
+        impl Respond for BgeM3 {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let tokens = padded(&sent_inputs(std::slice::from_ref(request))[0]);
+                if tokens > BGE_M3_LIMIT {
+                    return ResponseTemplate::new(400).set_body_json(json!({
+                        "result": null,
+                        "success": false,
+                        "errors": [{ "code": 5006, "message": format!(
+                            "Max context reached {tokens} tokens but model supports only {BGE_M3_LIMIT}"
+                        ) }],
+                        "messages": [],
+                    }));
+                }
+                embeddings(request)
+            }
+        }
+
+        async fn responding(response: impl Respond + 'static) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(ROUTE))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            server
+        }
+
+        fn bge_m3(server: &MockServer, key: &str) -> WorkersAiEmbedder {
+            WorkersAiEmbedder::new(
+                "acc-123".parse().unwrap(),
+                WorkersAiEmbedModel::BgeM3,
+                key.parse().unwrap(),
+            )
+            .unwrap()
+            .with_api_base(&format!("{}/client/v4", server.uri()).parse().unwrap())
+        }
+
         async fn workers_ai() -> Adapter {
-            let server = server(embeddings).await;
+            let server = responding(BgeM3).await;
             Adapter {
-                embedder: Box::new(embedder(&server).with_key(Some("cf-token".parse().unwrap()))),
+                embedder: Box::new(bge_m3(&server, "cf-token")),
                 _server: Some(server),
             }
         }
 
         embedder_contract!(workers_ai);
+
+        /// A section of `canon/LIMITS.md`'s shape: a heading and a table dense in digits.
+        fn section(i: usize, rows: usize) -> String {
+            format!(
+                "LIMITS\nLimit {i}\n\n{}",
+                "| api | 1,200/min |\n".repeat(rows)
+            )
+        }
+
+        #[tokio::test]
+        async fn requests_stay_under_the_models_padded_limit_with_no_setting() {
+            let server = responding(BgeM3).await;
+            let mut texts: Vec<String> = (0..35).map(|i| section(i, 3)).collect();
+            texts[20] = section(20, 436);
+            texts.extend((35..135).map(|i| section(i, 50 + (i * 37) % 1_400)));
+            assert!(texts[20].len() > 8_700);
+            assert!(texts.iter().any(|text| text.len() > 27_000));
+            assert!(padded(&texts[..35]) > BGE_M3_LIMIT);
+
+            let vectors = bge_m3(&server, "cf-token")
+                .embed(&texts, EmbedPurpose::Document)
+                .await
+                .unwrap();
+
+            let sent = sent_inputs(&server.received_requests().await.unwrap());
+            for batch in &sent {
+                assert!(padded(batch) <= 50_000, "{} texts", batch.len());
+                assert!(batch.len() <= 64);
+            }
+            assert_eq!(sent.concat(), texts);
+            let expected: Vec<_> = texts.iter().map(|text| vector_of(text)).collect();
+            assert_eq!(vectors, expected);
+        }
+
+        #[tokio::test]
+        async fn a_text_over_the_models_budget_fails_before_any_request() {
+            let server = responding(BgeM3).await;
+            let texts = [section(0, 3), section(1, 8_000)];
+
+            let error = bge_m3(&server, "cf-token")
+                .embed(&texts, EmbedPurpose::Document)
+                .await
+                .unwrap_err();
+
+            let report = format!("{error:#?}");
+            assert!(
+                report.contains("text 1 of 2")
+                    && report.contains("@cf/baai/bge-m3's 60000-token request limit")
+                    && !report.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
+                "{report}"
+            );
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn the_token_goes_to_the_accounts_route_and_chunks_keep_their_model() {
+            let server = responding(BgeM3).await;
+            let embedder = bge_m3(&server, "cf-token");
+
+            embedder
+                .embed(&["a".into()], EmbedPurpose::Query)
+                .await
+                .unwrap();
+
+            let sent = &server.received_requests().await.unwrap()[0];
+            assert_eq!(sent.url.path(), ROUTE);
+            assert_eq!(
+                sent.headers.get("authorization").unwrap(),
+                "Bearer cf-token"
+            );
+            assert_eq!(
+                sent.body_json::<Value>().unwrap()["model"],
+                "@cf/baai/bge-m3"
+            );
+            let openai_compatible = super::embedder(&server).model();
+            assert_eq!(
+                embedder.model(),
+                ModelRef::new("@cf/baai/bge-m3", openai_compatible.version)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_error_envelope_names_the_model_and_its_errors_but_not_the_token() {
+            let server = responding(ResponseTemplate::new(400).set_body_json(json!({
+                "result": null,
+                "success": false,
+                "errors": [{ "code": 5006, "message": "Max context reached 102060 tokens but model supports only 60000" }],
+                "messages": [],
+            })))
+            .await;
+
+            let error = bge_m3(&server, "cf-secret-token")
+                .embed(&["a".into()], EmbedPurpose::Document)
+                .await
+                .unwrap_err();
+
+            let report = format!("{error:?}");
+            assert!(
+                report.contains(
+                    "@cf/baai/bge-m3 failed with 400 Bad Request: 5006: Max context reached"
+                ) && report.contains(ROUTE),
+                "{report}"
+            );
+            assert!(!report.contains("cf-secret-token"), "{report}");
+        }
+
+        #[tokio::test]
+        async fn a_body_outside_the_envelope_names_its_host_and_quotes_200_bytes() {
+            let body = format!("<html>bad gateway {}", "x".repeat(300));
+            let server = responding(ResponseTemplate::new(502).set_body_string(body.clone())).await;
+
+            let error = bge_m3(&server, "cf-token")
+                .embed(&["a".into()], EmbedPurpose::Document)
+                .await
+                .unwrap_err();
+
+            let report = format!("{error:#?}");
+            let host = server.address().to_string();
+            assert!(
+                report.contains(&format!(
+                    "@cf/baai/bge-m3 at {host} returned 502 Bad Gateway"
+                )) && report.contains(&body[..200])
+                    && !report.contains(&body[..201]),
+                "{report}"
+            );
+        }
     }
 
     mod token_budget {
@@ -219,12 +394,51 @@ mod openai {
         let sent = sent_inputs(&server.received_requests().await.unwrap());
         assert!(sent.len() > 1, "{sent:?}");
         for batch in &sent {
-            let estimate: usize = batch.iter().map(|text| text.len().div_ceil(3)).sum();
-            assert!(estimate <= BUDGET, "{batch:?}");
+            assert!(padded(batch) <= BUDGET, "{batch:?}");
         }
         assert_eq!(sent.concat(), texts);
         let expected: Vec<_> = texts.iter().map(|text| vector_of(text)).collect();
         assert_eq!(vectors, expected);
+    }
+
+    /// A request's estimated tokens as Workers AI counts them: every text padded to the longest, at 3 bytes a token.
+    fn padded(batch: &[String]) -> usize {
+        batch.len()
+            * batch
+                .iter()
+                .map(|text| text.len().div_ceil(3))
+                .max()
+                .unwrap_or(0)
+    }
+
+    /// `canon/LIMITS.md`'s shape: 35 sections, one of about 8,770 bytes. Sent as one request they failed with `Max
+    /// context reached 102060 tokens but model supports only 60000` (35 x 2,916), though they sum to far less.
+    #[tokio::test]
+    async fn one_long_section_among_many_short_ones_splits_the_request() {
+        let server = server(embeddings).await;
+        let mut texts: Vec<String> = (0..35)
+            .map(|i| format!("LIMITS\nLimit {i}\n\nOne short rule."))
+            .collect();
+        texts[20] = format!(
+            "LIMITS\nRate limits\n\n{}",
+            "| api | 1,200/min |\n".repeat(436)
+        );
+        assert!(texts[20].len() > 8_700);
+        assert!(padded(&texts) > 60_000);
+
+        let vectors = embedder(&server)
+            .with_max_batch_tokens(NonZeroUsize::new(50_000))
+            .embed(&texts, EmbedPurpose::Document)
+            .await
+            .unwrap();
+
+        let sent = sent_inputs(&server.received_requests().await.unwrap());
+        assert!(sent.len() > 1, "{} requests", sent.len());
+        for batch in &sent {
+            assert!(padded(batch) <= 50_000, "{} texts", batch.len());
+        }
+        assert_eq!(sent.concat(), texts);
+        assert_eq!(vectors.len(), texts.len());
     }
 
     #[tokio::test]

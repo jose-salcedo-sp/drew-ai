@@ -244,9 +244,13 @@ mod workers_ai {
     const ROUTE: &str = "/client/v4/accounts/acc-123/ai/run/@cf/cloudflare/clef-flash";
 
     fn client(server: &MockServer, key: &str) -> WorkersAiSystemOne {
-        WorkersAiSystemOne::new("acc-123", CLEF_FLASH.parse().unwrap(), key.parse().unwrap())
-            .unwrap()
-            .with_api_base(&format!("{}/client/v4/", server.uri()).parse().unwrap())
+        WorkersAiSystemOne::new(
+            "acc-123".parse().unwrap(),
+            CLEF_FLASH.parse().unwrap(),
+            key.parse().unwrap(),
+        )
+        .unwrap()
+        .with_api_base(&format!("{}/client/v4/", server.uri()).parse().unwrap())
     }
 
     async fn responding(response: ResponseTemplate) -> MockServer {
