@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use eros::{Context, bail, ensure};
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -25,14 +26,15 @@ fn client() -> eros::Result<reqwest::Client> {
         .build()?)
 }
 
-fn endpoint(base_url: &str, path: &str) -> String {
-    format!("{}/{path}", base_url.trim_end_matches('/'))
+fn endpoint(base_url: &Url, path: &str) -> String {
+    format!("{}/{path}", base_url.as_str().trim_end_matches('/'))
 }
 
-#[eros::context("POST {}", url)]
+#[eros::context("POST {} for model {}", url, model)]
 async fn post(
     client: &reqwest::Client,
     url: &str,
+    model: &str,
     key: Option<&ApiKey>,
     body: &Value,
 ) -> eros::Result<Value> {
@@ -43,7 +45,7 @@ async fn post(
     let response = post.send().await?;
     let status = response.status();
     let text = response.text().await?;
-    ensure!(status.is_success(), "returned {status}: {text}");
+    ensure!(status.is_success(), "{model} returned {status}: {text}");
     Ok(serde_json::from_str(&text)?)
 }
 
@@ -121,7 +123,7 @@ impl OpenAiChat {
     /// # Errors
     ///
     /// When the HTTP client cannot be built.
-    pub fn new(base_url: &str, model: impl Into<String>) -> eros::Result<Self> {
+    pub fn new(base_url: &Url, model: impl Into<String>) -> eros::Result<Self> {
         Ok(Self {
             client: client()?,
             url: endpoint(base_url, "chat/completions"),
@@ -199,7 +201,14 @@ impl ChatModel for OpenAiChat {
 
     async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse> {
         let body = chat_body(&self.model, &request, self.options);
-        let response = post(&self.client, &self.url, self.key.as_ref(), &body).await?;
+        let response = post(
+            &self.client,
+            &self.url,
+            &self.model,
+            self.key.as_ref(),
+            &body,
+        )
+        .await?;
         Ok(ChatResponse {
             text: chat_text(&response)?,
             mean_logprob: None,
@@ -222,7 +231,7 @@ impl OpenAiEmbedder {
     /// # Errors
     ///
     /// When the HTTP client cannot be built.
-    pub fn new(base_url: &str, model: impl Into<String>) -> eros::Result<Self> {
+    pub fn new(base_url: &Url, model: impl Into<String>) -> eros::Result<Self> {
         Ok(Self {
             client: client()?,
             url: endpoint(base_url, "embeddings"),
@@ -283,7 +292,14 @@ impl Embedder for OpenAiEmbedder {
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in texts.chunks(EMBED_BATCH) {
             let body = json!({ "model": self.model, "input": batch });
-            let response = post(&self.client, &self.url, self.key.as_ref(), &body).await?;
+            let response = post(
+                &self.client,
+                &self.url,
+                &self.model,
+                self.key.as_ref(),
+                &body,
+            )
+            .await?;
             vectors.extend(embeddings(&response, batch.len())?);
         }
         Ok(vectors)
@@ -385,7 +401,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let chat = OpenAiChat::new(&format!("{}/v1/", server.uri()), "qwen3:14b").unwrap();
+        let chat = OpenAiChat::new(
+            &format!("{}/v1/", server.uri()).parse().unwrap(),
+            "qwen3:14b",
+        )
+        .unwrap();
         let response = chat.complete(request(Some(json!({})))).await.unwrap();
         assert_eq!(response.text, "{\"claims\": []}");
     }
@@ -400,14 +420,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = OpenAiChat::new(&server.uri(), "qwen3:14b")
+        let error = OpenAiChat::new(&server.uri().parse().unwrap(), "qwen3:14b")
             .unwrap()
             .with_key(Some("sk-secret".parse().unwrap()))
             .complete(request(None))
             .await
             .unwrap_err();
         let report = format!("{error:?}");
-        assert!(report.contains("not found"), "{report}");
+        assert!(
+            report.contains("not found") && report.contains("for model qwen3:14b"),
+            "{report}"
+        );
         assert!(!report.contains("sk-secret"), "{report}");
     }
 
@@ -427,7 +450,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let embedder = OpenAiEmbedder::new(&format!("{}/v1", server.uri()), "bge-m3").unwrap();
+        let embedder =
+            OpenAiEmbedder::new(&format!("{}/v1", server.uri()).parse().unwrap(), "bge-m3")
+                .unwrap();
         let vectors = embedder
             .embed(&["a".into(), "b".into()], EmbedPurpose::Document)
             .await

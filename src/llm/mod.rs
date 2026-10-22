@@ -142,3 +142,18 @@ pub trait ChatModel: Send + Sync {
     /// When the backend fails, times out, or returns no text.
     async fn complete(&self, request: ChatRequest) -> eros::Result<ChatResponse>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_never_formats_its_secret() {
+        let key: ApiKey = " cf-secret-token ".parse().unwrap();
+        assert_eq!(key.expose(), "cf-secret-token");
+        for shown in [format!("{key:?}"), format!("{key:#?}"), key.to_string()] {
+            assert!(!shown.contains("cf-secret-token"), "{shown}");
+        }
+        assert!("  ".parse::<ApiKey>().is_err());
+    }
+}

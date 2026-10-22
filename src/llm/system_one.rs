@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;
 use eros::ensure;
+use reqwest::Url;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 use crate::domain::{NotAProbability, Probability};
@@ -217,25 +218,24 @@ impl HttpSystemOne {
     ///
     /// When the HTTP client cannot be built.
     pub fn new(
-        base_url: &str,
+        base_url: &Url,
         model: impl Into<String>,
         key: Option<ApiKey>,
     ) -> eros::Result<Self> {
         Ok(Self {
-            client: http_client(REQUEST_TIMEOUT)?,
-            url: format!("{}/v1/systemone", base_url.trim_end_matches('/')),
+            client: client()?,
+            url: format!("{}/v1/systemone", base_url.as_str().trim_end_matches('/')),
             model: model.into(),
             key,
         })
     }
 }
 
-/// A client with [`CONNECT_TIMEOUT`] and the adapter's request timeout.
 #[eros::context("building the System One HTTP client")]
-fn http_client(request_timeout: Duration) -> eros::Result<reqwest::Client> {
+fn client() -> eros::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(request_timeout)
+        .timeout(REQUEST_TIMEOUT)
         .build()?)
 }
 
@@ -328,7 +328,7 @@ mod tests {
             .await;
 
         let client = HttpSystemOne::new(
-            &format!("{}/", server.uri()),
+            &format!("{}/", server.uri()).parse().unwrap(),
             "kev-latest",
             Some("secret".parse().unwrap()),
         )
@@ -404,7 +404,8 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let client = HttpSystemOne::new(&server.uri(), "kev-latest", None).unwrap();
+        let client =
+            HttpSystemOne::new(&server.uri().parse().unwrap(), "kev-latest", None).unwrap();
 
         let response = client.decide(request()).await.unwrap();
 

@@ -207,10 +207,13 @@ mod openai {
     }
 
     fn chat(server: &MockServer, key: Option<&str>, options: ChatOptions) -> OpenAiChat {
-        OpenAiChat::new(&format!("{}/v1", server.uri()), "qwen3:14b")
-            .unwrap()
-            .with_key(key.map(|key| key.parse().unwrap()))
-            .with_options(options)
+        OpenAiChat::new(
+            &format!("{}/v1", server.uri()).parse().unwrap(),
+            "qwen3:14b",
+        )
+        .unwrap()
+        .with_key(key.map(|key| key.parse().unwrap()))
+        .with_options(options)
     }
 
     async fn openai(reply: Reply) -> Adapter {
@@ -320,12 +323,14 @@ mod openai {
 
     #[test]
     fn the_options_are_part_of_the_model_version() {
-        let server_uri = "http://127.0.0.1:9/v1";
         let model = |options| {
-            OpenAiChat::new(server_uri, "@cf/qwen/qwen3.8-27b")
-                .unwrap()
-                .with_options(options)
-                .model()
+            OpenAiChat::new(
+                &"http://127.0.0.1:9/v1".parse().unwrap(),
+                "@cf/qwen/qwen3.8-27b",
+            )
+            .unwrap()
+            .with_options(options)
+            .model()
         };
         assert_eq!(model(ChatOptions::default()).version, "openai-compatible");
         assert_eq!(

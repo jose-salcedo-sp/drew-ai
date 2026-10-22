@@ -142,7 +142,7 @@ mod openai {
     }
 
     fn embedder(server: &MockServer) -> OpenAiEmbedder {
-        OpenAiEmbedder::new(&format!("{}/v1", server.uri()), "bge-m3").unwrap()
+        OpenAiEmbedder::new(&format!("{}/v1", server.uri()).parse().unwrap(), "bge-m3").unwrap()
     }
 
     async fn openai() -> Adapter {

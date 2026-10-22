@@ -1,29 +1,24 @@
 //! `drew models check`: one call to each model backend `drew serve` and `drew eval run` would use, with the same
 //! arguments, so a wrong URL, key, model id or AWS profile shows in seconds instead of mid-run.
+//!
+//! Backends are parsed and built by [`crate::llm::backend`], which also says what to print about a backend's
+//! ambient settings; this module only calls the ports.
 
 use std::{fmt, time::Duration};
 
-use aws_config::{BehaviorVersion, timeout::TimeoutConfig};
-use aws_sdk_bedrockruntime::{
-    config::{Credentials, ProvideCredentials},
-    error::DisplayErrorContext,
-};
 use eros::{Context, ensure};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::{
     llm::{
-        self, ChatModel, ChatRequest, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
-        backend::{ChatBackendKind, EmbedBackendKind, SystemOneBackendKind},
+        ChatModel, ChatRequest, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
+        backend::{ChatBackend, EmbedBackend, SystemOneBackend},
         system_one::{Decision, DecisionRequest, SystemOne},
     },
     pipeline::answerer::PipelineArgs,
 };
 
-/// Bounds loading the AWS config and resolving credentials, which may query instance metadata.
-const AWS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const AWS_CREDENTIALS_TIMEOUT: Duration = Duration::from_secs(15);
 /// `Explain`'s own budget: a reasoning effort that spends it all before answering fails here too.
 const PROBE_MAX_TOKENS: u32 = 2048;
 const QUESTION_ID: &str = "check";
@@ -65,35 +60,54 @@ impl fmt::Display for Port {
     }
 }
 
-/// One call to one backend.
+/// One port's probe.
 #[derive(Debug)]
 pub struct Probe {
-    /// The port called.
+    /// The port probed.
     pub port: Port,
-    /// The adapter's model, or the configured name and `not built` when the adapter could not be built.
-    pub model: ModelRef,
-    /// Time spent in the call, zero when the adapter could not be built.
-    pub latency: Duration,
-    /// The call's outcome.
-    pub outcome: eros::Result<()>,
+    /// What happened.
+    pub outcome: Outcome,
+}
+
+/// Whether the adapter was built, and if so how its one call went.
+#[derive(Debug)]
+pub enum Outcome {
+    /// A backend setting was missing, unparsable or unused, or the client could not be built; nothing was called.
+    NotBuilt(eros::ErrorUnion),
+    /// The adapter was called once.
+    Called {
+        /// The adapter's model.
+        model: ModelRef,
+        /// Time spent in the call.
+        latency: Duration,
+        /// The call's outcome.
+        result: eros::Result<()>,
+    },
+}
+
+impl Probe {
+    /// Not built, or called and failed.
+    pub fn failed(&self) -> bool {
+        match &self.outcome {
+            Outcome::NotBuilt(_) => true,
+            Outcome::Called { result, .. } => result.is_err(),
+        }
+    }
 }
 
 /// What `drew models check` found.
 #[derive(Debug)]
 pub struct Check {
-    /// Backend selections worth knowing before reading the probes, such as Bedrock and its AWS region.
+    /// What each backend says about its ambient settings, such as Bedrock's AWS region, or why a port is not called.
     pub notes: Vec<String>,
-    /// One per configured port, in port order.
+    /// One per called port, in port order.
     pub probes: Vec<Probe>,
 }
 
 impl Check {
     /// How many probes failed.
     pub fn failed(&self) -> usize {
-        self.probes
-            .iter()
-            .filter(|probe| probe.outcome.is_err())
-            .count()
+        self.probes.iter().filter(|probe| probe.failed()).count()
     }
 }
 
@@ -102,18 +116,19 @@ impl fmt::Display for Check {
         for note in &self.notes {
             writeln!(f, "{note}")?;
         }
-        for probe in &self.probes {
-            let ModelRef { id, version } = &probe.model;
-            let latency = probe.latency;
-            match &probe.outcome {
-                Ok(()) => writeln!(f, "{:<10}  {id} ({version})  {latency:.1?}  ok", probe.port)?,
-                Err(error) => {
-                    writeln!(
-                        f,
-                        "{:<10}  {id} ({version})  {latency:.1?}  error",
-                        probe.port
-                    )?;
-                    writeln!(f, "{error:#?}")?;
+        for Probe { port, outcome } in &self.probes {
+            match outcome {
+                Outcome::NotBuilt(error) => writeln!(f, "{port:<10}  not built\n{error:#?}")?,
+                Outcome::Called {
+                    model: ModelRef { id, version },
+                    latency,
+                    result,
+                } => {
+                    write!(f, "{port:<10}  {id} ({version})  {latency:.1?}  ")?;
+                    match result {
+                        Ok(()) => writeln!(f, "ok")?,
+                        Err(error) => writeln!(f, "error\n{error:#?}")?,
+                    }
                 }
             }
         }
@@ -142,103 +157,60 @@ pub async fn run(args: Args) -> eros::Result<()> {
     }
 }
 
-/// Calls each backend `args` selects once, concurrently. System One is not probed when its backend is `none`.
+/// Calls each backend `args` selects once, concurrently. A port whose backend calls nothing (System One `none`)
+/// gets a note instead of a probe.
 pub async fn check(args: &PipelineArgs) -> Check {
-    let (bedrock, embeddings, explain, system_one) = tokio::join!(
-        bedrock_note(args),
+    let (embeddings, explain, system_one) = tokio::join!(
         probe_embeddings(args),
         probe_explain(args),
         probe_system_one(args),
     );
-    let mut notes: Vec<String> = bedrock.into_iter().collect();
-    let mut probes = vec![embeddings, explain];
-    match system_one {
-        Some(probe) => probes.push(probe),
-        None => notes.push(
-            "system one: none (DREW_SYSTEM_ONE_BACKEND=none); every question is classified open"
-                .to_owned(),
-        ),
+    let mut notes = Vec::new();
+    let mut probes = Vec::new();
+    for (note, probe) in [embeddings, explain, system_one] {
+        notes.extend(note);
+        probes.extend(probe);
     }
     Check { notes, probes }
 }
 
-/// Which ports use Bedrock, the AWS region, and which provider resolved credentials.
-async fn bedrock_note(args: &PipelineArgs) -> Option<String> {
-    let ports: Vec<&str> = [
-        (args.embed.embed_backend == EmbedBackendKind::Bedrock)
-            .then_some("embeddings (DREW_EMBED_BACKEND=bedrock)"),
-        (args.chat.explain_backend == ChatBackendKind::Bedrock)
-            .then_some("explain (DREW_EXPLAIN_BACKEND=bedrock)"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if ports.is_empty() {
-        return None;
-    }
-    let config = aws_config::defaults(BehaviorVersion::latest())
-        .timeout_config(
-            TimeoutConfig::builder()
-                .connect_timeout(AWS_CONNECT_TIMEOUT)
-                .build(),
-        )
-        .load()
-        .await;
-    let region = config
-        .region()
-        .map_or_else(|| "unset".to_owned(), ToString::to_string);
-    let credentials = match config.credentials_provider() {
-        None => "none configured".to_owned(),
-        Some(provider) => {
-            match tokio::time::timeout(AWS_CREDENTIALS_TIMEOUT, provider.provide_credentials())
-                .await
-            {
-                Ok(Ok(credentials)) => format!("from {}", provider_name(&credentials)),
-                Ok(Err(error)) => format!("none resolved: {}", DisplayErrorContext(error)),
-                Err(_) => format!("none resolved within {AWS_CREDENTIALS_TIMEOUT:?}"),
-            }
-        }
-    };
-    Some(format!(
-        "Bedrock selected for {}: AWS region {region}, credentials {credentials}",
-        ports.join(" and ")
-    ))
+type Probed = (Option<String>, Option<Probe>);
+
+fn not_built(port: Port, error: eros::ErrorUnion) -> Probed {
+    (
+        None,
+        Some(Probe {
+            port,
+            outcome: Outcome::NotBuilt(error),
+        }),
+    )
 }
 
-fn provider_name(credentials: &Credentials) -> String {
-    // `Credentials` names its provider only in `Debug`, which redacts the secret; nothing else from it is printed.
-    let debug = format!("{credentials:?}");
-    debug
-        .split_once("provider_name: \"")
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map_or_else(
-            || "an unnamed provider".to_owned(),
-            |(name, _)| format!("the {name} provider"),
-        )
-}
-
-fn not_built(port: Port, model: &str, error: eros::ErrorUnion) -> Probe {
+/// Times `call`, which does nothing until awaited here.
+async fn timed(port: Port, model: ModelRef, call: impl Future<Output = eros::Result<()>>) -> Probe {
+    let start = Instant::now();
+    let result = call.await;
     Probe {
         port,
-        model: ModelRef::new(model, "not built"),
-        latency: Duration::ZERO,
-        outcome: Err(error),
+        outcome: Outcome::Called {
+            model,
+            latency: start.elapsed(),
+            result,
+        },
     }
 }
 
-async fn probe_embeddings(args: &PipelineArgs) -> Probe {
-    let embedder = match llm::embedder(&args.embed).await {
-        Ok(embedder) => embedder,
-        Err(error) => return not_built(Port::Embeddings, &args.embed.embed_model, error),
+async fn probe_embeddings(args: &PipelineArgs) -> Probed {
+    let backend = match EmbedBackend::try_from(&args.embed) {
+        Ok(backend) => backend,
+        Err(error) => return not_built(Port::Embeddings, error.into()),
     };
-    let start = Instant::now();
-    let outcome = embed_once(&*embedder).await;
-    Probe {
-        port: Port::Embeddings,
-        model: embedder.model(),
-        latency: start.elapsed(),
-        outcome,
-    }
+    let note = backend.note().await;
+    let probe = match backend.build().await {
+        Ok(embedder) => timed(Port::Embeddings, embedder.model(), embed_once(&*embedder)).await,
+        Err(error) => return (note, not_built(Port::Embeddings, error).1),
+    };
+    (note, Some(probe))
 }
 
 #[eros::context("embedding one query")]
@@ -254,19 +226,17 @@ async fn embed_once(embedder: &dyn Embedder) -> eros::Result<()> {
     Ok(())
 }
 
-async fn probe_explain(args: &PipelineArgs) -> Probe {
-    let chat = match llm::explain_model(&args.chat).await {
-        Ok(chat) => chat,
-        Err(error) => return not_built(Port::Explain, &args.chat.explain_model, error),
+async fn probe_explain(args: &PipelineArgs) -> Probed {
+    let backend = match ChatBackend::try_from(&args.chat) {
+        Ok(backend) => backend,
+        Err(error) => return not_built(Port::Explain, error.into()),
     };
-    let start = Instant::now();
-    let outcome = explain_once(&*chat).await;
-    Probe {
-        port: Port::Explain,
-        model: chat.model(),
-        latency: start.elapsed(),
-        outcome,
-    }
+    let note = backend.note().await;
+    let probe = match backend.build().await {
+        Ok(chat) => timed(Port::Explain, chat.model(), explain_once(&*chat)).await,
+        Err(error) => return (note, not_built(Port::Explain, error).1),
+    };
+    (note, Some(probe))
 }
 
 #[eros::context("asking for a one-field JSON reply")]
@@ -294,28 +264,25 @@ async fn explain_once(chat: &dyn ChatModel) -> eros::Result<()> {
     Ok(())
 }
 
-async fn probe_system_one(args: &PipelineArgs) -> Option<Probe> {
-    if args.system_one.system_one_backend == SystemOneBackendKind::None {
-        return None;
-    }
-    let model = args
-        .system_one
-        .system_one_model
-        .as_deref()
-        .unwrap_or("unset");
-    let system_one = match llm::system_one_client(&args.system_one) {
-        Ok(Some(system_one)) => system_one,
-        Ok(None) => return None,
-        Err(error) => return Some(not_built(Port::SystemOne, model, error)),
+async fn probe_system_one(args: &PipelineArgs) -> Probed {
+    let backend = match SystemOneBackend::try_from(&args.system_one) {
+        Ok(backend) => backend,
+        Err(error) => return not_built(Port::SystemOne, error.into()),
     };
-    let start = Instant::now();
-    let outcome = decide_once(&*system_one).await;
-    Some(Probe {
-        port: Port::SystemOne,
-        model: system_one.model(),
-        latency: start.elapsed(),
-        outcome,
-    })
+    let note = backend.note();
+    let probe = match backend.build() {
+        Ok(Some(system_one)) => Some(
+            timed(
+                Port::SystemOne,
+                system_one.model(),
+                decide_once(&*system_one),
+            )
+            .await,
+        ),
+        Ok(None) => None,
+        Err(error) => not_built(Port::SystemOne, error).1,
+    };
+    (note, probe)
 }
 
 #[eros::context("asking one yes/no question")]

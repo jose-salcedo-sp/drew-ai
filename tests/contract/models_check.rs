@@ -11,7 +11,7 @@ use drew::{
         },
         openai::ReasoningEffort,
     },
-    models::{Port, check},
+    models::{Outcome, Port, check},
     pipeline::answerer::PipelineArgs,
 };
 use serde_json::json;
@@ -59,7 +59,7 @@ fn clef_flash_answer() -> ResponseTemplate {
 }
 
 fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
-    let openai_base = Some(format!("{}{ACCOUNT}/v1", server.uri()));
+    let openai_base = Some(format!("{}{ACCOUNT}/v1", server.uri()).parse().unwrap());
     let workers_ai = system_one == SystemOneBackendKind::WorkersAi;
     PipelineArgs {
         config: ConfigArgs::default(),
@@ -80,7 +80,8 @@ fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
         system_one: SystemOneArgs {
             system_one_backend: system_one,
             system_one_model: workers_ai.then(|| "@cf/cloudflare/clef-flash".into()),
-            system_one_url: workers_ai.then(|| format!("{}/client/v4", server.uri())),
+            system_one_url: workers_ai
+                .then(|| format!("{}/client/v4", server.uri()).parse().unwrap()),
             system_one_account_id: workers_ai.then(|| "acc-123".into()),
             system_one_key: workers_ai.then(|| TOKEN.parse().unwrap()),
         },
@@ -120,11 +121,7 @@ async fn a_failing_backend_is_reported_with_its_error_and_the_others_still_pass(
     let check = check(&args(&server, SystemOneBackendKind::WorkersAi)).await;
 
     assert_eq!(check.failed(), 1, "{check}");
-    let failed = check
-        .probes
-        .iter()
-        .find(|probe| probe.outcome.is_err())
-        .unwrap();
+    let failed = check.probes.iter().find(|probe| probe.failed()).unwrap();
     assert_eq!(failed.port, Port::SystemOne);
     let report = check.to_string();
     assert!(
@@ -145,9 +142,16 @@ async fn a_missing_setting_fails_its_port_by_name() {
     let check = check(&args).await;
 
     assert_eq!(check.failed(), 1, "{check}");
+    assert!(matches!(
+        check
+            .probes
+            .last()
+            .map(|probe| (probe.port, &probe.outcome)),
+        Some((Port::SystemOne, Outcome::NotBuilt(_)))
+    ));
     let report = check.to_string();
     assert!(
-        report.contains("not built")
+        report.contains("system one  not built")
             && report.contains(
                 "DREW_SYSTEM_ONE_ACCOUNT_ID is required with DREW_SYSTEM_ONE_BACKEND=workers-ai"
             ),

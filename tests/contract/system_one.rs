@@ -143,7 +143,7 @@ mod http {
 
     fn client(server: &MockServer, key: Option<&str>) -> HttpSystemOne {
         HttpSystemOne::new(
-            &format!("{}/", server.uri()),
+            &format!("{}/", server.uri()).parse().unwrap(),
             "kev-latest",
             key.map(|key| key.parse().unwrap()),
         )
@@ -244,13 +244,9 @@ mod workers_ai {
     const ROUTE: &str = "/client/v4/accounts/acc-123/ai/run/@cf/cloudflare/clef-flash";
 
     fn client(server: &MockServer, key: &str) -> WorkersAiSystemOne {
-        WorkersAiSystemOne::new(
-            &format!("{}/client/v4/", server.uri()),
-            "acc-123",
-            CLEF_FLASH,
-            key.parse().unwrap(),
-        )
-        .unwrap()
+        WorkersAiSystemOne::new("acc-123", CLEF_FLASH.parse().unwrap(), key.parse().unwrap())
+            .unwrap()
+            .with_api_base(&format!("{}/client/v4/", server.uri()).parse().unwrap())
     }
 
     async fn responding(response: ResponseTemplate) -> MockServer {
@@ -366,18 +362,5 @@ mod workers_ai {
             report.contains(CLEF_FLASH) && report.contains("502") && report.contains("bad gateway"),
             "{report}"
         );
-    }
-
-    #[test]
-    fn a_model_that_is_not_a_workers_ai_id_is_rejected() {
-        let error = WorkersAiSystemOne::new(
-            "https://api.cloudflare.com/client/v4",
-            "acc-123",
-            "clef-flash",
-            "cf-token".parse().unwrap(),
-        )
-        .err()
-        .unwrap();
-        assert!(format!("{error:#?}").contains(CLEF_FLASH));
     }
 }

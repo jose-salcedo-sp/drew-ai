@@ -186,13 +186,13 @@ On the 2026-10-22 DaaS run (`eval/results/daas-2026-10-22-v5.json`) System One r
 
 See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), the model backends below, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
 
-Each model port names its backend, with no default. A backend's missing setting, or a setting it does not use, is a startup error naming the variable. Keys are never printed.
+Each model port names its backend, with no default. A backend's missing or unparsable setting (a URL is checked when parsed), or a setting it does not use, is a startup error naming the variable. Keys are never printed.
 
 | Port | Backends | Variables |
 |---|---|---|
 | Embeddings | `bedrock`, `openai-compatible` (Ollama, Workers AI) | `DREW_EMBED_BACKEND`, `DREW_EMBED_MODEL`; `openai-compatible`: `DREW_EMBED_URL`, optional `DREW_EMBED_KEY` |
 | Explain | `bedrock`, `openai-compatible` (Ollama, Workers AI) | `DREW_EXPLAIN_BACKEND`, `DREW_EXPLAIN_MODEL`; `openai-compatible`: `DREW_EXPLAIN_URL`, optional `DREW_EXPLAIN_KEY`, `DREW_EXPLAIN_REASONING_EFFORT` (`low`, `medium`, `xhigh`), `DREW_EXPLAIN_SCHEMA_FORMAT` (`openai`, `bare`) |
-| System One | `none`, `system-one` (Kev, system-one.dev), `workers-ai` (Clef) | `DREW_SYSTEM_ONE_BACKEND`; `system-one`: `DREW_SYSTEM_ONE_URL`, `DREW_SYSTEM_ONE_MODEL`, optional `DREW_SYSTEM_ONE_KEY`; `workers-ai`: `DREW_SYSTEM_ONE_ACCOUNT_ID`, `DREW_SYSTEM_ONE_MODEL`, `DREW_SYSTEM_ONE_KEY` |
+| System One | `none`, `system-one` (Kev, system-one.dev), `workers-ai` (Clef) | `DREW_SYSTEM_ONE_BACKEND`; `system-one`: `DREW_SYSTEM_ONE_URL`, `DREW_SYSTEM_ONE_MODEL`, optional `DREW_SYSTEM_ONE_KEY`; `workers-ai`: `DREW_SYSTEM_ONE_ACCOUNT_ID`, `DREW_SYSTEM_ONE_MODEL`, `DREW_SYSTEM_ONE_KEY`, optional `DREW_SYSTEM_ONE_URL` (an API root in place of Cloudflare's, such as a gateway) |
 
 ## Code layout
 
