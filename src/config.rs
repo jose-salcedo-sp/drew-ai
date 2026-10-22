@@ -621,20 +621,25 @@ mod tests {
     }
 
     #[test]
+    fn the_hosted_config_differs_from_the_shipped_one_only_in_explain_max_tokens() {
+        let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let mut hosted =
+            PipelineConfig::parse(include_str!("../config/drew-workers-ai.json")).unwrap();
+        hosted.explain.max_tokens = shipped.explain.max_tokens;
+        assert_eq!(
+            hosted, shipped,
+            "config/drew-workers-ai.json and config/drew.json differ in more than explain.max_tokens; change both \
+             files, or record the deliberate difference in this test"
+        );
+    }
+
+    #[test]
     fn explain_max_tokens_defaults_to_2048_and_is_bounded_on_every_load_path() {
         assert_eq!(PipelineConfig::default().explain.max_tokens.get(), 2048);
         let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
         assert_eq!(shipped.explain.max_tokens, MaxTokens::DEFAULT);
         let hosted = PipelineConfig::parse(include_str!("../config/drew-workers-ai.json")).unwrap();
         assert_eq!(hosted.explain.max_tokens.get(), 8192);
-        assert_eq!(
-            PipelineConfig {
-                explain: ExplainConfig::default(),
-                ..hosted.clone()
-            },
-            shipped,
-            "drew-workers-ai.json differs from drew.json only in explain"
-        );
         let max = PipelineConfig::parse(r#"{"explain": {"max_tokens": 65536}}"#).unwrap();
         assert_eq!(max.explain.max_tokens.get(), MaxTokens::MAX);
 
