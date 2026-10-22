@@ -565,10 +565,11 @@ pub fn regressions(baseline: &Baseline, current: &MetricsReport) -> Vec<Regressi
             };
             let current_value = now.and_then(|now| now.get(metric).value);
             let tolerance = baseline.tolerances.get(&metric).copied().unwrap_or(0.0);
-            let regressed = match current_value {
+            let (base_steps, tolerance_steps) = (steps(baseline_value), steps(tolerance));
+            let regressed = match current_value.map(steps) {
                 None => true,
-                Some(value) if metric.higher_is_better() => value < baseline_value - tolerance,
-                Some(value) => value > baseline_value + tolerance,
+                Some(value) if metric.higher_is_better() => value < base_steps - tolerance_steps,
+                Some(value) => value > base_steps + tolerance_steps,
             };
             if regressed {
                 found.push(Regression {
@@ -582,6 +583,15 @@ pub fn regressions(baseline: &Baseline, current: &MetricsReport) -> Vec<Regressi
         }
     }
     found
+}
+
+/// The resolution [`regressions`] compares metric values and tolerances at. A mean parsed back from a results file
+/// can differ in its last bit from the same mean computed from runs, so the raw `f64`s are not compared.
+pub const METRIC_RESOLUTION: f64 = 1e-9;
+
+/// `value` as a whole number of [`METRIC_RESOLUTION`] steps.
+fn steps(value: f64) -> i64 {
+    (value / METRIC_RESOLUTION).round() as i64
 }
 
 pub(super) fn scope_name(category: Option<CategoryKind>) -> &'static str {
