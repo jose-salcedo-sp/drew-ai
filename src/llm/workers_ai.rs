@@ -1,30 +1,33 @@
 //! Workers AI adapters, all under `https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/` with a bearer API
 //! token:
 //!
-//! - [`WorkersAiEmbedder`] and [`WorkersAiChat`] post to the OpenAI-compatible `v1/embeddings` and
-//!   `v1/chat/completions` routes, with the bodies and replies of [`super::openai`]. The embedder packs every request
-//!   under its model's documented request limit, so no setting can leave a request unbounded.
+//! - [`WorkersAiChat`] posts to the OpenAI-compatible `v1/chat/completions` route, with the body and reply of
+//!   [`super::openai`].
+//! - [`WorkersAiEmbedder`] runs its model on the native `ai/run/{model}` route, `{"text": [...], "truncate_inputs":
+//!   true}`, because the OpenAI-compatible route ignores `truncate_inputs` and rejects an input over the model's input
+//!   limit. It packs every request under the model's documented request limit, so no setting can leave a request
+//!   unbounded.
 //! - [`WorkersAiSystemOne`] runs Cloudflare's Clef models, e.g. `@cf/cloudflare/clef-flash`, on `ai/run/{model}`. The
 //!   body is the System One [`DecisionRequest`], with `model` set to the selector the model page names (`clef` or
-//!   `clef-flash`, the id's last segment), and the reply is wrapped as
-//!   `{"result": ..., "success": ..., "errors": [...], "messages": [...]}` with the System One answer set as `result`.
+//!   `clef-flash`, the id's last segment).
 //!
-//! A failure answered with that envelope is reported by its `errors`; any other body is quoted, with the host that
-//! sent it.
+//! An `ai/run` reply is wrapped as `{"result": ..., "success": ..., "errors": [...], "messages": [...]}`. A failure
+//! answered with that envelope, on any route, is reported by its `errors`; any other body is quoted, with the host
+//! that sent it.
 
 use std::{fmt, num::NonZeroUsize, str::FromStr, time::Duration};
 
 use async_trait::async_trait;
 use eros::{Context, bail};
 use reqwest::{StatusCode, Url};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 
 use super::{
     ApiKey, ChatModel, ChatRequest, ChatResponse, EmbedPurpose, Embedder, ModelRef,
     openai::{
-        BatchBudget, CHAT_PATH, ChatOptions, EMBEDDINGS_PATH, batches, chat_body, chat_text,
-        embed_model_ref, embeddings, embeddings_body,
+        BatchBudget, CHAT_PATH, ChatOptions, batches, chat_body, chat_text, checked_vectors,
+        embed_model_ref, estimated_tokens,
     },
     system_one::{DecisionRequest, DecisionResponse, SystemOne},
 };
@@ -44,6 +47,9 @@ const BODY_PREVIEW_BYTES: usize = 200;
 /// longest text: 35 sections whose longest was about 2,916 tokens failed with `Max context reached 102060 tokens but
 /// model supports only 60000`.
 const BGE_M3_REQUEST_TOKENS: usize = 60_000;
+/// bge-m3's limit on one input; with `truncate_inputs` a longer input is embedded from its first 8,192 tokens, as
+/// Ollama's bge-m3 does, instead of failing with `Sequence too long: 10670 > 8192`.
+const BGE_M3_INPUT_TOKENS: usize = 8_192;
 /// Tokens a packed request stays under its model's limit by, on top of the 3-bytes-a-token estimate: text dense in
 /// digits and symbols, such as a table of limits, can tokenize nearer 2 bytes a token.
 const REQUEST_TOKEN_MARGIN: usize = 10_000;
@@ -90,7 +96,7 @@ pub struct WorkersAiModel {
 
 impl WorkersAiModel {
     /// The full id, used in the route and recorded as the [`ModelRef`] id.
-    fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 
@@ -143,26 +149,33 @@ impl FromStr for WorkersAiModel {
 /// rather than given a guessed budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkersAiEmbedModel {
-    /// `@cf/baai/bge-m3`: 60,000 tokens a request, with every text padded to the longest.
+    /// `@cf/baai/bge-m3`: 60,000 tokens a request, with every text padded to the longest, and 8,192 an input.
     BgeM3,
 }
 
 impl WorkersAiEmbedModel {
     const ALL: [Self; 1] = [Self::BgeM3];
 
-    fn id(self) -> &'static str {
+    /// The full id, which names the `ai/run` route.
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::BgeM3 => "@cf/baai/bge-m3",
         }
     }
 
-    /// The padded estimate one request stays under: the model's limit less [`REQUEST_TOKEN_MARGIN`].
+    /// The padded estimate one request stays under: the model's limit less [`REQUEST_TOKEN_MARGIN`]. The estimate
+    /// is of the untruncated texts, since whether Workers AI checks the request limit before or after truncating is
+    /// not documented; a text over the budget alone is sent alone.
     fn batch_budget(self) -> BatchBudget {
         match self {
-            Self::BgeM3 => BatchBudget::new(
-                BGE_M3_BATCH_TOKENS,
-                "@cf/baai/bge-m3's 60000-token request limit, less a safety margin",
-            ),
+            Self::BgeM3 => BatchBudget::truncating(BGE_M3_BATCH_TOKENS),
+        }
+    }
+
+    /// The longest input the model embeds whole; the server truncates a longer one.
+    fn input_tokens(self) -> usize {
+        match self {
+            Self::BgeM3 => BGE_M3_INPUT_TOKENS,
         }
     }
 }
@@ -205,12 +218,12 @@ pub(crate) fn cloudflare_api() -> Url {
         .expect("CLOUDFLARE_API is a valid URL")
 }
 
-/// The model's `ai/run` route under the API root.
-pub(crate) fn run_path(account: &AccountId, model: &WorkersAiModel) -> String {
-    format!("accounts/{account}/ai/run/{}", model.id())
+/// The `ai/run` route of the model `model_id` under the API root.
+pub(crate) fn run_path(account: &AccountId, model_id: &str) -> String {
+    format!("accounts/{account}/ai/run/{model_id}")
 }
 
-/// An OpenAI-compatible route, such as [`EMBEDDINGS_PATH`], under the API root.
+/// An OpenAI-compatible route, such as [`CHAT_PATH`], under the API root.
 pub(crate) fn openai_path(account: &AccountId, path: &str) -> String {
     format!("accounts/{account}/ai/v1/{path}")
 }
@@ -288,6 +301,37 @@ impl Account {
         Ok(Reply { status, host, text })
     }
 
+    /// The `result` of running `model` on its `ai/run` route.
+    #[eros::context("POST {} for {}", self.route(&run_path(&self.id, model)), model)]
+    async fn run<T, B>(&self, model: &str, body: &B) -> eros::Result<T>
+    where
+        T: DeserializeOwned,
+        B: Serialize + Sync,
+    {
+        let reply = self
+            .send(&self.route(&run_path(&self.id, model)), body)
+            .await?;
+        let status = reply.status;
+        let envelope = serde_json::from_str::<Envelope>(&reply.text).with_context(|| {
+            format!(
+                "{model} at {} returned {status} without the Workers AI envelope: {}",
+                reply.host,
+                reply.preview()
+            )
+        })?;
+        match envelope {
+            Envelope {
+                success: true,
+                result: Some(result),
+                ..
+            } if status.is_success() => Ok(T::deserialize(result)
+                .with_context(|| format!("reading the result {model} returned"))?),
+            Envelope { errors, .. } => {
+                bail!("{model} failed with {status}: {}", messages(&errors))
+            }
+        }
+    }
+
     /// The OpenAI-shaped reply of an OpenAI-compatible route.
     #[eros::context("POST {} for {}", self.route(&openai_path(&self.id, path)), model)]
     async fn post_openai(&self, path: &str, model: &str, body: &Value) -> eros::Result<Value> {
@@ -320,9 +364,10 @@ impl Account {
     }
 }
 
-/// [`Embedder`] over Workers AI's OpenAI-compatible `embeddings` route, in requests of at most 64 texts whose count
-/// times their longest text's estimated tokens stays a safety margin under the model's request limit. Ignores
-/// [`EmbedPurpose`].
+/// [`Embedder`] over Workers AI's native `ai/run` route with `truncate_inputs`, in requests of at most 64 texts whose
+/// count times their longest text's estimated tokens stays a safety margin under the model's request limit. An input
+/// over the model's input limit is embedded from its start. Ignores [`EmbedPurpose`]: bge-m3 embeds a query and a
+/// document alike, and its `query`/`contexts` input scores contexts against a query instead of embedding.
 pub struct WorkersAiEmbedder {
     account: Account,
     model: WorkersAiEmbedModel,
@@ -358,17 +403,39 @@ impl Embedder for WorkersAiEmbedder {
     }
 
     async fn embed(&self, texts: &[String], _purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
+        self.embed_texts(texts).await
+    }
+}
+
+/// The `result` of an embedding run: one vector per input, in input order.
+#[derive(Deserialize)]
+struct Embedded {
+    data: Vec<Vec<f32>>,
+}
+
+impl WorkersAiEmbedder {
+    #[eros::context("embedding {} texts with {}", texts.len(), self.model)]
+    async fn embed_texts(&self, texts: &[String]) -> eros::Result<Vec<Vec<f32>>> {
+        let limit = self.model.input_tokens();
+        let truncated = texts
+            .iter()
+            .filter(|text| estimated_tokens(text) > limit)
+            .count();
+        if truncated > 0 {
+            tracing::warn!(
+                model = %self.model,
+                truncated,
+                inputs = texts.len(),
+                "{truncated} of {} inputs are estimated over the model's {limit}-token input limit; each is \
+                 embedded from its first {limit} tokens",
+                texts.len()
+            );
+        }
         let mut vectors = Vec::with_capacity(texts.len());
         for batch in batches(texts, Some(self.model.batch_budget()))? {
-            let response = self
-                .account
-                .post_openai(
-                    EMBEDDINGS_PATH,
-                    self.model.id(),
-                    &embeddings_body(self.model.id(), batch),
-                )
-                .await?;
-            vectors.extend(embeddings(&response, batch.len())?);
+            let body = json!({ "text": batch, "truncate_inputs": true });
+            let embedded: Embedded = self.account.run(self.model.id(), &body).await?;
+            vectors.extend(checked_vectors(embedded.data, batch.len())?);
         }
         Ok(vectors)
     }
@@ -455,8 +522,10 @@ impl WorkersAiSystemOne {
         }
     }
 
+    #[cfg(test)]
     fn route(&self) -> String {
-        self.account.route(&run_path(&self.account.id, &self.model))
+        self.account
+            .route(&run_path(&self.account.id, self.model.id()))
     }
 }
 
@@ -472,11 +541,11 @@ impl SystemOne for WorkersAiSystemOne {
 }
 
 /// Workers AI's REST envelope. `success` is required, so a JSON body from another server is not read as an empty
-/// failure.
+/// failure. `result` is read only on success, since a failure may carry `{}` there.
 #[derive(Deserialize)]
 struct Envelope {
     #[serde(default)]
-    result: Option<RunResult>,
+    result: Option<Value>,
     success: bool,
     #[serde(default)]
     errors: Vec<ApiMessage>,
@@ -523,43 +592,23 @@ fn messages(errors: &[ApiMessage]) -> String {
 }
 
 impl WorkersAiSystemOne {
-    #[eros::context("POST {}", self.route())]
+    #[eros::context("asking {} for decisions", self.model)]
     async fn post(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
         let request = DecisionRequest {
             model: self.model.name().to_owned(),
             ..request
         };
-        let reply = self.account.send(&self.route(), &request).await?;
-        let status = reply.status;
-        let envelope = serde_json::from_str::<Envelope>(&reply.text).with_context(|| {
-            format!(
-                "{} at {} returned {status} without the Workers AI envelope: {}",
-                self.model,
-                reply.host,
-                reply.preview()
-            )
-        })?;
-        match envelope {
-            Envelope {
-                success: true,
-                result: Some(result),
-                ..
-            } if status.is_success() => {
-                if let (Some(usage), Some(context)) = (&result.usage, self.model.context_tokens())
-                    && usage.input_tokens + TRUNCATION_MARGIN >= context
-                {
-                    tracing::warn!(
-                        model = %self.model,
-                        input_tokens = usage.input_tokens,
-                        "the System One state may have been truncated to fit the {context}-token context"
-                    );
-                }
-                Ok(result.response)
-            }
-            Envelope { errors, .. } => {
-                bail!("{} failed with {status}: {}", self.model, messages(&errors))
-            }
+        let result: RunResult = self.account.run(self.model.id(), &request).await?;
+        if let (Some(usage), Some(context)) = (&result.usage, self.model.context_tokens())
+            && usage.input_tokens + TRUNCATION_MARGIN >= context
+        {
+            tracing::warn!(
+                model = %self.model,
+                input_tokens = usage.input_tokens,
+                "the System One state may have been truncated to fit the {context}-token context"
+            );
         }
+        Ok(result.response)
     }
 }
 
@@ -601,6 +650,7 @@ mod tests {
         let model: WorkersAiEmbedModel = "@cf/baai/bge-m3".parse().unwrap();
         assert_eq!(model, WorkersAiEmbedModel::BgeM3);
         assert_eq!(model.batch_budget().tokens(), 50_000);
+        assert_eq!(model.input_tokens(), 8_192);
         let error = "@cf/baai/bge-large-en-v1.5"
             .parse::<WorkersAiEmbedModel>()
             .unwrap_err()

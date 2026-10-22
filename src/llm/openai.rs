@@ -240,17 +240,37 @@ pub struct OpenAiEmbedder {
     max_batch_tokens: Option<BatchBudget>,
 }
 
-/// The most estimated tokens one embeddings request carries, counted as in [`batches`], and what sets it, which the
-/// error for a text over it names.
+/// The most estimated tokens one embeddings request carries, counted as in [`batches`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BatchBudget {
     tokens: NonZeroUsize,
-    source: &'static str,
+    oversized: Oversized,
+}
+
+/// What [`batches`] does with a text whose estimate alone is over the budget.
+#[derive(Clone, Copy, Debug)]
+enum Oversized {
+    /// Fails before any request, naming what sets the budget: the server would reject the text.
+    Reject { source: &'static str },
+    /// Sends it in a request of its own: the server truncates each input to fit.
+    SendAlone,
 }
 
 impl BatchBudget {
+    /// A budget a text alone must fit; `source` is what sets it.
     pub(crate) const fn new(tokens: NonZeroUsize, source: &'static str) -> Self {
-        Self { tokens, source }
+        Self {
+            tokens,
+            oversized: Oversized::Reject { source },
+        }
+    }
+
+    /// A budget for a server that truncates each input, so a text over it alone goes in its own request.
+    pub(crate) const fn truncating(tokens: NonZeroUsize) -> Self {
+        Self {
+            tokens,
+            oversized: Oversized::SendAlone,
+        }
     }
 
     #[cfg(test)]
@@ -306,22 +326,22 @@ pub(crate) fn embeddings_body(model: &str, batch: &[String]) -> Value {
 }
 
 /// A conservative token count for `text`; see [`BYTES_PER_TOKEN`].
-fn estimated_tokens(text: &str) -> usize {
+pub(crate) fn estimated_tokens(text: &str) -> usize {
     text.len().div_ceil(BYTES_PER_TOKEN)
 }
 
 /// `texts` cut, in order, into runs of at most [`EMBED_BATCH`] and, with a budget, whose text count times longest
-/// text's estimate is at most the budget.
+/// text's estimate is at most the budget, except a text over it alone on a truncating server, which runs alone.
 ///
 /// # Errors
 ///
-/// When one text alone is over the budget; no batch is returned, so nothing is sent.
+/// When one text alone is over a budget that rejects it; no batch is returned, so nothing is sent.
 #[eros::context("packing {} texts into embeddings requests", texts.len())]
 pub(crate) fn batches(
     texts: &[String],
     budget: Option<BatchBudget>,
 ) -> eros::Result<Vec<&[String]>> {
-    let Some(BatchBudget { tokens, source }) = budget else {
+    let Some(BatchBudget { tokens, oversized }) = budget else {
         return Ok(texts.chunks(EMBED_BATCH).collect());
     };
     let max_tokens = tokens.get();
@@ -329,14 +349,16 @@ pub(crate) fn batches(
     let (mut start, mut longest) = (0, 0);
     for (index, text) in texts.iter().enumerate() {
         let estimate = estimated_tokens(text);
-        ensure!(
-            estimate <= max_tokens,
-            "text {index} of {} is about {estimate} tokens ({} bytes), over the {max_tokens}-token batch budget \
-             ({source}); it starts {:?}",
-            texts.len(),
-            text.len(),
-            &text[..text.floor_char_boundary(TEXT_PREVIEW_BYTES)]
-        );
+        if let Oversized::Reject { source } = oversized {
+            ensure!(
+                estimate <= max_tokens,
+                "text {index} of {} is about {estimate} tokens ({} bytes), over the {max_tokens}-token batch \
+                 budget ({source}); it starts {:?}",
+                texts.len(),
+                text.len(),
+                &text[..text.floor_char_boundary(TEXT_PREVIEW_BYTES)]
+            );
+        }
         let padded = (index - start + 1) * longest.max(estimate);
         if index > start && (padded > max_tokens || index - start == EMBED_BATCH) {
             batches.push(&texts[start..index]);
@@ -367,22 +389,30 @@ pub(crate) fn embeddings(response: &Value, count: usize) -> eros::Result<Vec<Vec
         embedding: Vec<f32>,
     }
     let mut data = Response::deserialize(response)?.data;
-    ensure!(
-        data.len() == count,
-        "expected {count} embeddings, got {}",
-        data.len()
-    );
     data.sort_by_key(|item| item.index);
-    for item in &data {
-        if item.embedding.len() != EMBEDDING_DIM {
-            bail!(
-                "the embedding model returned {} dimensions, but chunks store {EMBEDDING_DIM}; use a \
-                 {EMBEDDING_DIM}-dimension model such as bge-m3 or mxbai-embed-large",
-                item.embedding.len()
-            );
-        }
+    checked_vectors(data.into_iter().map(|item| item.embedding).collect(), count)
+}
+
+/// `vectors`, when they are `count` vectors of [`EMBEDDING_DIM`].
+///
+/// # Errors
+///
+/// When the count or a dimension differs.
+#[eros::context("checking {} vectors", count)]
+pub(crate) fn checked_vectors(vectors: Vec<Vec<f32>>, count: usize) -> eros::Result<Vec<Vec<f32>>> {
+    ensure!(
+        vectors.len() == count,
+        "expected {count} embeddings, got {}",
+        vectors.len()
+    );
+    if let Some(vector) = vectors.iter().find(|vector| vector.len() != EMBEDDING_DIM) {
+        bail!(
+            "the embedding model returned {} dimensions, but chunks store {EMBEDDING_DIM}; use a \
+             {EMBEDDING_DIM}-dimension model such as bge-m3 or mxbai-embed-large",
+            vector.len()
+        );
     }
-    Ok(data.into_iter().map(|item| item.embedding).collect())
+    Ok(vectors)
 }
 
 #[async_trait]
@@ -641,6 +671,19 @@ mod tests {
                 && error.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_truncating_budget_sends_a_text_over_it_alone() {
+        let texts: Vec<String> = [3, 3, 31, 3]
+            .iter()
+            .map(|bytes| "x".repeat(*bytes))
+            .collect();
+        let truncating = BatchBudget::truncating(NonZeroUsize::new(10).unwrap());
+        let packed = batches(&texts, Some(truncating)).unwrap();
+        let sizes: Vec<_> = packed.iter().map(|batch| batch.len()).collect();
+        assert_eq!(sizes, [2, 1, 1]);
+        assert_eq!(packed.concat(), texts);
     }
 
     #[test]
