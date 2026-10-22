@@ -489,7 +489,7 @@ impl ChatModel for WorkersAiChat {
             .post_openai(CHAT_PATH, self.model.id(), &body)
             .await?;
         Ok(ChatResponse {
-            text: chat_text(&response)?,
+            text: chat_text(&response, request.max_tokens)?,
             mean_logprob: None,
         })
     }

@@ -11,7 +11,7 @@ use aws_sdk_bedrockruntime::{
     operation::converse::ConverseOutput,
     types::{
         ContentBlock, ConversationRole, ConverseOutput as Reply, InferenceConfiguration, Message,
-        SpecificToolChoice, SystemContentBlock, Tool, ToolChoice, ToolConfiguration,
+        SpecificToolChoice, StopReason, SystemContentBlock, Tool, ToolChoice, ToolConfiguration,
         ToolInputSchema, ToolSpecification,
     },
 };
@@ -140,7 +140,7 @@ impl ChatModel for BedrockChat {
                     DisplayErrorContext(error)
                 )
             })?;
-        chat_response(output, request.json_schema.is_some())
+        chat_response(output, &request)
     }
 }
 
@@ -184,7 +184,18 @@ fn respond_tool(schema: &Value) -> eros::Result<ToolConfiguration> {
         .build()?)
 }
 
-fn chat_response(output: ConverseOutput, structured: bool) -> eros::Result<ChatResponse> {
+/// # Errors
+///
+/// When the reply stopped at `max_tokens`, even with partial content, or holds no message.
+#[eros::context("reading the Converse reply")]
+fn chat_response(output: ConverseOutput, request: &ChatRequest) -> eros::Result<ChatResponse> {
+    eros::ensure!(
+        output.stop_reason != StopReason::MaxTokens,
+        "answer cut off at max_tokens={} (stop reason max_tokens); on a reasoning model max_tokens also bounds \
+         the reasoning",
+        request.max_tokens
+    );
+    let structured = request.json_schema.is_some();
     let Some(Reply::Message(message)) = output.output else {
         eros::bail!(
             "Bedrock returned no message (stop reason {})",
@@ -361,7 +372,7 @@ mod tests {
             ],
         );
 
-        let response = chat_response(output, true).unwrap();
+        let response = chat_response(output, &request(Some(json!({})))).unwrap();
 
         assert_eq!(
             serde_json::from_str::<Value>(&response.text).unwrap(),
@@ -382,7 +393,9 @@ mod tests {
         );
 
         assert_eq!(
-            chat_response(output, true).unwrap().text,
+            chat_response(output, &request(Some(json!({}))))
+                .unwrap()
+                .text,
             "I cannot comply."
         );
     }
@@ -394,7 +407,24 @@ mod tests {
             vec![ContentBlock::Text("Hello".into())],
         );
 
-        assert_eq!(chat_response(output, false).unwrap().text, "Hello");
+        assert_eq!(chat_response(output, &request(None)).unwrap().text, "Hello");
+    }
+
+    #[test]
+    fn a_reply_stopped_at_max_tokens_is_cut_off_even_with_a_tool_call() {
+        let output = output(
+            StopReason::MaxTokens,
+            vec![tool_use(RESPOND_TOOL, &json!({ "claims": [] }))],
+        );
+
+        let error = format!(
+            "{:#?}",
+            chat_response(output, &request(Some(json!({})))).unwrap_err()
+        );
+        assert!(
+            error.contains("answer cut off at max_tokens=512 (stop reason max_tokens)"),
+            "{error}"
+        );
     }
 
     #[test]

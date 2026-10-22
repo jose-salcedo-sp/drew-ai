@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
+    config::MaxTokens,
     domain::{ChunkId, Probability, Question},
     llm::{ChatModel, ChatRequest},
     pipeline::{Boolean, DeclineReason, Open, Scored, Step, StepError, trace::ExplainRecord},
@@ -16,8 +17,6 @@ use super::{Decided, Reranked};
 pub const PROMPT_VERSION: &str = "explain-open-v3";
 /// The prompt version for explaining a yes/no verdict; bump with the same rule as [`PROMPT_VERSION`].
 pub const BOOLEAN_PROMPT_VERSION: &str = "explain-boolean-v2";
-
-const MAX_TOKENS: u32 = 2048;
 
 const SYSTEM: &str = r#"You are Drew AI. You answer questions about SailPoint Access Risk Management (ARM) and SAP for internal SailPoint developers and support engineers, using only the sources in the user message. Answer the way Drew, the ARM subject-matter expert, would, and be visibly honest about the difference between what is known and what is assumed.
 
@@ -47,16 +46,21 @@ Respond only with JSON matching the provided schema."#;
 const VERDICT_RULES: &str = r#"A decision model has already answered this yes/no question; its verdict is inside <verdict>. Explain why the verdict holds, in claims that cite the sources. If the sources you would cite contradict the verdict, set contradicts_verdict to true and list the claims that show the contradiction. Never change the verdict yourself."#;
 
 /// Writes the "why" from the reranked sources: the whole answer for `open`, the reason for a decided verdict.
+///
+/// A reply cut off at `max_tokens` fails the run rather than declining: the budget is too small for the model, a
+/// configuration problem, not a question Drew cannot answer.
 pub struct Explain<TCategory> {
     chat: Arc<dyn ChatModel>,
+    max_tokens: MaxTokens,
     category: PhantomData<TCategory>,
 }
 
 impl<TCategory> Explain<TCategory> {
-    /// `chat` is the "why" LLM.
-    pub fn new(chat: Arc<dyn ChatModel>) -> Self {
+    /// `chat` is the "why" LLM; `max_tokens` bounds its reply, reasoning included.
+    pub fn new(chat: Arc<dyn ChatModel>, max_tokens: MaxTokens) -> Self {
         Self {
             chat,
+            max_tokens,
             category: PhantomData,
         }
     }
@@ -90,7 +94,7 @@ impl<TCategory> Explain<TCategory> {
         let request = ChatRequest {
             system,
             user,
-            max_tokens: MAX_TOKENS,
+            max_tokens: self.max_tokens.get(),
             temperature: 0.0,
             json_schema: Some(schema(&sources, verdict.is_some())),
         };
