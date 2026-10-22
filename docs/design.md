@@ -230,6 +230,8 @@ let answered = match classified {
 
 Retrieval starting values (tuned by eval): top 50 hybrid chunks → expand to parent page/section/thread and dedupe → `Rerank` → top 5 to `Answer` and `Explain`.
 
+Measured options for raising retrieval recall (BM25, query expansion, a grep channel, enrichment) are in [research/search/](research/search/README.md).
+
 ### 5.5 Answer and explain by category
 
 | Category | `Answer` output | `Explain` input |
