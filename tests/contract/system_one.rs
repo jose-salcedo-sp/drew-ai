@@ -363,4 +363,30 @@ mod workers_ai {
             "{report}"
         );
     }
+
+    #[tokio::test]
+    async fn another_servers_json_404_names_its_host_and_quotes_200_bytes_of_its_body() {
+        let detail = format!("Not Found {}", "x".repeat(300));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "detail": detail })))
+            .mount(&server)
+            .await;
+
+        let error = client(&server, "cf-token")
+            .decide(request())
+            .await
+            .unwrap_err();
+
+        let report = format!("{error:#?}");
+        let host = server.address().to_string();
+        let quoted = &format!(r#"{{"detail":"{detail}"}}"#)[..200];
+        assert!(
+            report.contains(&format!("at {host} returned 404 Not Found"))
+                && report.contains(quoted)
+                && !report.contains(&format!("{quoted}x"))
+                && !report.contains("no error message"),
+            "{report}"
+        );
+    }
 }

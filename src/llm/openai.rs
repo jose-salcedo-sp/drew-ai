@@ -17,6 +17,10 @@ use super::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const EMBED_BATCH: usize = 64;
+/// The chat route under the base URL.
+pub(crate) const CHAT_PATH: &str = "chat/completions";
+/// The embeddings route under the base URL.
+pub(crate) const EMBEDDINGS_PATH: &str = "embeddings";
 
 #[eros::context("building the OpenAI-compatible HTTP client")]
 fn client() -> eros::Result<reqwest::Client> {
@@ -126,7 +130,7 @@ impl OpenAiChat {
     pub fn new(base_url: &Url, model: impl Into<String>) -> eros::Result<Self> {
         Ok(Self {
             client: client()?,
-            url: endpoint(base_url, "chat/completions"),
+            url: endpoint(base_url, CHAT_PATH),
             model: model.into(),
             key: None,
             options: ChatOptions::default(),
@@ -234,7 +238,7 @@ impl OpenAiEmbedder {
     pub fn new(base_url: &Url, model: impl Into<String>) -> eros::Result<Self> {
         Ok(Self {
             client: client()?,
-            url: endpoint(base_url, "embeddings"),
+            url: endpoint(base_url, EMBEDDINGS_PATH),
             model: model.into(),
             key: None,
         })

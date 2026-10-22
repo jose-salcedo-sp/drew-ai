@@ -203,6 +203,9 @@ pub trait SystemOne: Send + Sync {
     async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse>;
 }
 
+/// The decision route under the server root.
+pub(crate) const DECIDE_PATH: &str = "v1/systemone";
+
 /// [`SystemOne`] over `POST {base_url}/v1/systemone`, with a 120 s request timeout.
 pub struct HttpSystemOne {
     client: reqwest::Client,
@@ -224,7 +227,7 @@ impl HttpSystemOne {
     ) -> eros::Result<Self> {
         Ok(Self {
             client: client()?,
-            url: format!("{}/v1/systemone", base_url.as_str().trim_end_matches('/')),
+            url: format!("{}/{DECIDE_PATH}", base_url.as_str().trim_end_matches('/')),
             model: model.into(),
             key,
         })

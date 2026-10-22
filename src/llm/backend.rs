@@ -17,11 +17,14 @@ use reqwest::Url;
 
 use super::{
     ApiKey, ChatModel, Embedder,
-    bedrock_chat::{BedrockChat, aws_environment},
+    bedrock_chat::{BedrockChat, aws_environment, bedrock_endpoint},
     bedrock_embed::BedrockEmbedder,
-    openai::{ChatOptions, OpenAiChat, OpenAiEmbedder, ReasoningEffort, SchemaFormat},
-    system_one::{HttpSystemOne, SystemOne},
-    workers_ai::{WorkersAiModel, WorkersAiSystemOne},
+    openai::{
+        CHAT_PATH, ChatOptions, EMBEDDINGS_PATH, OpenAiChat, OpenAiEmbedder, ReasoningEffort,
+        SchemaFormat,
+    },
+    system_one::{DECIDE_PATH, HttpSystemOne, SystemOne},
+    workers_ai::{WorkersAiModel, WorkersAiSystemOne, cloudflare_api, run_path},
 };
 
 /// The embedding model and the backend that serves it.
@@ -97,8 +100,8 @@ pub struct SystemOneArgs {
     /// Model: e.g. `kev-latest`, `clef-flash` on system-one.dev, or `@cf/cloudflare/clef-flash` on Workers AI.
     #[arg(long, env = "DREW_SYSTEM_ONE_MODEL")]
     pub system_one_model: Option<String>,
-    /// Server root: required for `system-one`, e.g. `http://127.0.0.1:8009` or `https://system-one.dev`. For
-    /// `workers-ai`, an API root in place of `https://api.cloudflare.com/client/v4`, such as a gateway.
+    /// `system-one` only, and required there: the server root, e.g. `http://127.0.0.1:8009` or
+    /// `https://system-one.dev`.
     #[arg(long, env = "DREW_SYSTEM_ONE_URL")]
     pub system_one_url: Option<Url>,
     /// `workers-ai` only: the Cloudflare account id.
@@ -133,6 +136,33 @@ pub(crate) enum InvalidBackend {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+/// Where a backend sends its requests: scheme, host, port and path. Credentials, query and fragment are dropped, so
+/// it is safe to print.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint(String);
+
+impl Endpoint {
+    /// `path` under `base`, as the adapters build their routes.
+    pub(crate) fn new(base: &Url, path: &str) -> Self {
+        let port = base
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        Self(format!(
+            "{}://{}{port}{}/{path}",
+            base.scheme(),
+            base.host_str().unwrap_or_default(),
+            base.path().trim_end_matches('/'),
+        ))
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The backend selection that settings are checked against.
@@ -224,6 +254,14 @@ impl EmbedBackend {
         }
     }
 
+    /// Where the embedder posts; `None` on Bedrock with no AWS region.
+    pub(crate) async fn endpoint(&self) -> Option<Endpoint> {
+        match self {
+            Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/invoke")).await,
+            Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, EMBEDDINGS_PATH)),
+        }
+    }
+
     #[eros::context("setting up the embeddings backend")]
     pub(crate) async fn build(self) -> eros::Result<Arc<dyn Embedder>> {
         Ok(match self {
@@ -309,6 +347,14 @@ impl ChatBackend {
         }
     }
 
+    /// Where `Explain` posts; `None` on Bedrock with no AWS region.
+    pub(crate) async fn endpoint(&self) -> Option<Endpoint> {
+        match self {
+            Self::Bedrock { model } => bedrock_endpoint(&format!("model/{model}/converse")).await,
+            Self::OpenAiCompatible { url, .. } => Some(Endpoint::new(url, CHAT_PATH)),
+        }
+    }
+
     #[eros::context("setting up the Explain backend")]
     pub(crate) async fn build(self) -> eros::Result<Arc<dyn ChatModel>> {
         Ok(match self {
@@ -336,7 +382,6 @@ pub(crate) enum SystemOneBackend {
         key: Option<ApiKey>,
     },
     WorkersAi {
-        api_base: Option<Url>,
         account_id: String,
         model: WorkersAiModel,
         key: ApiKey,
@@ -386,6 +431,7 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                     system_one_account_id,
                     system_one_key,
                 } = args;
+                selected.reject(system_one_url.as_ref(), "DREW_SYSTEM_ONE_URL")?;
                 let model = selected
                     .require(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?
                     .parse()
@@ -396,7 +442,6 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                         }
                     })?;
                 Self::WorkersAi {
-                    api_base: system_one_url.clone(),
                     account_id: selected
                         .require(system_one_account_id.as_ref(), "DREW_SYSTEM_ONE_ACCOUNT_ID")?,
                     model,
@@ -420,6 +465,20 @@ impl SystemOneBackend {
         }
     }
 
+    /// Where System One posts; `None` for [`SystemOneBackend::None`].
+    pub(crate) fn endpoint(&self) -> Option<Endpoint> {
+        match self {
+            Self::None => None,
+            Self::SystemOne { url, .. } => Some(Endpoint::new(url, DECIDE_PATH)),
+            Self::WorkersAi {
+                account_id, model, ..
+            } => Some(Endpoint::new(
+                &cloudflare_api(),
+                &run_path(account_id, model),
+            )),
+        }
+    }
+
     /// `None` for [`SystemOneBackend::None`].
     #[eros::context("setting up the System One backend")]
     pub(crate) fn build(self) -> eros::Result<Option<Arc<dyn SystemOne>>> {
@@ -429,17 +488,10 @@ impl SystemOneBackend {
                 Some(Arc::new(HttpSystemOne::new(&url, model, key)?))
             }
             Self::WorkersAi {
-                api_base,
                 account_id,
                 model,
                 key,
-            } => {
-                let client = WorkersAiSystemOne::new(&account_id, model, key)?;
-                Some(Arc::new(match &api_base {
-                    Some(api_base) => client.with_api_base(api_base),
-                    None => client,
-                }))
-            }
+            } => Some(Arc::new(WorkersAiSystemOne::new(&account_id, model, key)?)),
         })
     }
 }
@@ -614,10 +666,12 @@ mod tests {
             ])
         };
         let cli = workers_ai("@cf/cloudflare/clef-flash");
-        assert!(matches!(
-            SystemOneBackend::try_from(&cli.system_one),
-            Ok(SystemOneBackend::WorkersAi { api_base: None, .. })
-        ));
+        let backend = SystemOneBackend::try_from(&cli.system_one).unwrap();
+        assert!(matches!(backend, SystemOneBackend::WorkersAi { .. }));
+        assert_eq!(
+            backend.endpoint().unwrap().to_string(),
+            "https://api.cloudflare.com/client/v4/accounts/acc/ai/run/@cf/cloudflare/clef-flash"
+        );
         assert!(system_one_client(&cli.system_one).unwrap().is_some());
 
         let error = SystemOneBackend::try_from(&workers_ai("kev-latest").system_one)
@@ -628,6 +682,48 @@ mod tests {
             error.starts_with("DREW_SYSTEM_ONE_MODEL: ")
                 && error.contains("@cf/cloudflare/clef-flash"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn workers_ai_rejects_a_system_one_url_left_over_from_kev() {
+        let cli = parse(&[
+            "--explain-backend",
+            "openai-compatible",
+            "--system-one-backend",
+            "workers-ai",
+            "--system-one-model",
+            "@cf/cloudflare/clef-flash",
+            "--system-one-account-id",
+            "acc",
+            "--system-one-key",
+            "token",
+            "--system-one-url",
+            "http://127.0.0.1:8009",
+        ]);
+        assert_eq!(
+            SystemOneBackend::try_from(&cli.system_one)
+                .err()
+                .unwrap()
+                .to_string(),
+            "DREW_SYSTEM_ONE_URL is set, but DREW_SYSTEM_ONE_BACKEND=workers-ai does not use it; unset it"
+        );
+        assert!(system_one_client(&cli.system_one).is_err());
+    }
+
+    #[test]
+    fn an_endpoint_keeps_scheme_host_port_and_path_only() {
+        let base: Url = "http://user:secret@127.0.0.1:8009/root/?key=secret#frag"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            Endpoint::new(&base, DECIDE_PATH).to_string(),
+            "http://127.0.0.1:8009/root/v1/systemone"
+        );
+        let base: Url = "https://system-one.dev".parse().unwrap();
+        assert_eq!(
+            Endpoint::new(&base, DECIDE_PATH).to_string(),
+            "https://system-one.dev/v1/systemone"
         );
     }
 
