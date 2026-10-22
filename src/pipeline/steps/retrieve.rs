@@ -5,7 +5,7 @@ use crate::{
     pipeline::{
         Asked, DeclineReason, Scored, Step, StepError, Unclassified, trace::RetrieveRecord,
     },
-    retrieval::Retriever,
+    retrieval::{Retrieval, Retriever},
 };
 
 use super::{Candidates, ranked};
@@ -35,9 +35,11 @@ impl Step for Retrieve {
         question: &Question,
         _input: Asked,
     ) -> Result<Scored<Candidates, RetrieveRecord>, StepError> {
-        let hits = self.retriever.retrieve(question.as_str()).await?;
+        let Retrieval { hits, expansion } =
+            self.retriever.retrieve_expanded(question.as_str()).await?;
         let record = RetrieveRecord {
             chunks: ranked(&hits),
+            expansion,
         };
         let Ok(hits) = AtLeastOne::try_from(hits) else {
             return Err(StepError::decline(DeclineReason::NoSources).with_record(record));
@@ -52,8 +54,9 @@ mod tests {
 
     use super::*;
     use crate::{
+        domain::{ChunkId, ChunkRef, ChunkVersion},
         pipeline::steps::fixtures::chunk,
-        retrieval::{Relevance, Retrieved},
+        retrieval::{Relevance, Retrieved, glossary::Glossary},
     };
 
     struct Fixed(Vec<Retrieved>);
@@ -92,5 +95,52 @@ mod tests {
             .map(|ranked| ranked.context_for.as_ref())
             .collect();
         assert_eq!(context, [None, Some(&matched.id)]);
+    }
+
+    struct Expanding(Glossary);
+
+    #[async_trait]
+    impl Retriever for Expanding {
+        async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>> {
+            Ok(self.retrieve_expanded(query).await?.hits)
+        }
+
+        async fn retrieve_expanded(&self, query: &str) -> eros::Result<Retrieval> {
+            Ok(Retrieval {
+                hits: vec![Retrieved {
+                    chunk: chunk("hit", "page", "the earlier screens"),
+                    score: Relevance(0.5),
+                    context_for: None,
+                }],
+                expansion: self.0.expand(query, 8),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_record_lists_the_expansion() {
+        let source = ChunkRef {
+            id: ChunkId("markdown:LEXICON.md#generations".into()),
+            version: ChunkVersion("v1".into()),
+        };
+        let glossary = Glossary::parse([(
+            source.clone(),
+            "| Internal | Say instead |\n|---|---|\n| Legacy / NEW generation | the earlier screens |",
+        )]);
+        let scored = Retrieve::new(Arc::new(Expanding(glossary)))
+            .run(&Question::new("Only the NEW screen?"), Asked)
+            .await
+            .unwrap();
+
+        let matches = scored.record.expansion.matches();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].matched, "new");
+        assert_eq!(matches[0].source, source);
+        assert_eq!(
+            matches[0].terms,
+            ["legacy", "generation", "earlier", "screens"]
+        );
+        let json = serde_json::to_value(&scored.record).unwrap();
+        assert_eq!(json["expansion"][0]["matched"], "new");
     }
 }

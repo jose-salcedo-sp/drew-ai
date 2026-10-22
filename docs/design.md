@@ -43,7 +43,7 @@ Ingestion:
 | Language | Rust, single crate, one binary: `drew serve`, `drew ingest`, `drew eval` |
 | Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `server`, `slack`, `eval` |
 | Store | Postgres + pgvector (Docker Compose for the demo; Aurora later, where native RLS covers the security phase) |
-| Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (SAP identifiers like `S_TCODE`, `AGR_USERS` embed poorly). Full text ranks exact identifier matches first, then BM25 in plain SQL over corpus statistics that `drew ingest` refreshes (no extension, so it runs on Aurora) |
+| Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (SAP identifiers like `S_TCODE`, `AGR_USERS` embed poorly). Full text ranks exact identifier matches first, then BM25 in plain SQL over corpus statistics that `drew ingest` refreshes (no extension, so it runs on Aurora). Before searching, a question gains the words of the glossary table rows it names by a part, alternative or acronym of their term (`retrieval.expansion` lists the glossary documents; parsed from their current chunks on each retrieval, capped per question, recorded in the `Retrieve` trace) |
 | Embeddings, "why" LLM | Amazon Bedrock (AI Council approved), dev AWS account. For local development, any OpenAI-compatible server (Ollama, llama.cpp), e.g. `bge-m3` and `qwen3:14b` |
 | System One | TypeSafe's System One API (`POST /v1/systemone`): yes/no, choice, and score questions over a text, answered with calibrated probabilities. Served locally by [Kev](https://github.com/jaredpalmer/kev) (MLX on Apple Silicon); a hosted endpoint later is a URL change |
 | Libraries | `axum`, `sqlx`, `pgvector`, `aws-sdk-bedrockruntime`, `reqwest`, `serde` |

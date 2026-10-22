@@ -28,6 +28,23 @@ golden file as the argument (`grep_probe.py` also reads `DREW_DOCS_DIR`). The re
 ## Phase 2: glossary/lexicon query expansion (deterministic, no model)
 - Expand question terms through canon/GLOSSARY.md and customer/LEXICON.md (parsed at ingest).
 - Prototype (by hand): fixed 3 of the 4 misses that have an entry (q06 17th, q24 8th, q44 11th).
+- Done (`retrieval/glossary.rs`): rows parsed from the current glossary chunks on each retrieval, so no reingest and
+  no second copy. A row is selected by a two-word part or alternative of its first cell, or an acronym (`NEW`,
+  `SoD` from `Segregation-of-duties`) written in capitals in the question; naming the whole term selects nothing
+  (that stopped `EAM` and `ErpMaestro` costing q58 and q26). At most 16 terms; the question plus terms feeds both
+  BM25 and the embedding. `cargo eval-retrieval` against the BM25 baseline (recall@10 68.1%, @50 86.2%):
+
+  | Variant | @10 | @50 | Gained | Lost |
+  |---|---|---|---|---|
+  | 1. any 2+ capital word, BM25 only | 66.4 | 87.1 | q44 | q26, q58 |
+  | 2. same, terms as a separate BM25 list | 68.1 | 86.2 | q24 | q58 |
+  | 3. capitals-majority acronyms, BM25 only, terms weigh 0.5 | 66.4 | 87.1 | q44 (one of two) | q58 |
+  | 4. 3 at weight 1, whole term selects nothing | 68.1 | 87.9 | q44 | — |
+  | 5. 4, also the embedded query (kept) | 70.7 | 87.9 | q24, q44 | — |
+  | 6. 4, plus separate BM25 and vector lists of the expansion | 69.8 | 87.9 | q24, q44 | — |
+
+  q06 still misses: its row adds "segregation duties two conflicting business functions", too common to lift
+  `HIT-LOGIC.md#when-a-risk-becomes-a-hit`.
 
 ## Phase 3: grep channel as a third RRF list (the user's idea; keep only if it adds recall over phase 1)
 - ripgrep over the ingested layers only (phase 0 scope type); 3 rarest terms + capitalised phrases; map

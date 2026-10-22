@@ -14,7 +14,7 @@ use drew::{
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
         Relevance, Retrieved, Retriever,
-        hybrid::{EmbeddingModelMismatch, HybridConfig, HybridRetriever},
+        hybrid::{EmbeddingModelMismatch, ExpansionConfig, HybridConfig, HybridRetriever},
     },
     store::chunks::ChunkStore,
 };
@@ -600,4 +600,55 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
         1.0
     );
     assert_eq!(recall_at_k(&results, &[proposals, start], 1), 0.5);
+}
+
+#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
+    let lexicon = document(&pool, SourceKind::Markdown, "LEXICON.md", "Lexicon").await;
+    let row = SeedChunk::new(
+        &lexicon,
+        "generations",
+        0,
+        "| Internal | Say instead |\n|---|---|\n\
+         | Legacy / NEW generation | \"the current screens\" and \"the earlier screens\" |",
+    )
+    .insert(&pool)
+    .await;
+    let doc = document(&pool, SourceKind::Markdown, "change.md", "Change").await;
+    let target = SeedChunk::new(
+        &doc,
+        "body",
+        0,
+        "The earlier generation keeps its legacy behaviour until migration.",
+    )
+    .insert(&pool)
+    .await;
+    let question = "Is a fix on the NEW screen enough?";
+
+    let plain = retriever(&pool, full_text_only())
+        .retrieve(question)
+        .await
+        .unwrap();
+    assert_eq!(position(&plain, &target), None);
+
+    let config = HybridConfig {
+        expansion: ExpansionConfig {
+            documents: vec![lexicon],
+            max_terms: 16,
+        },
+        ..full_text_only()
+    };
+    let expanded = retriever(&pool, config)
+        .retrieve_expanded(question)
+        .await
+        .unwrap();
+    assert!(position(&expanded.hits, &target).is_some());
+    let matches = expanded.expansion.matches();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].matched, "new");
+    assert_eq!(matches[0].source.id, row);
+    assert_eq!(
+        matches[0].terms,
+        ["legacy", "generation", "current", "screens", "earlier"]
+    );
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{CategoryKind, ChunkId, ChunkRef, Probability},
     llm::ModelRef,
-    retrieval::Relevance,
+    retrieval::{Relevance, glossary::Expansion},
 };
 
 use super::DeclineReason;
@@ -128,6 +128,10 @@ pub struct ClassifyRecord {
 pub struct RetrieveRecord {
     /// Every retrieved chunk, best first.
     pub chunks: Vec<RankedChunk>,
+    /// The glossary entries the question matched and the terms they added to the search. Records written before it
+    /// existed have none.
+    #[serde(default, skip_serializing_if = "Expansion::is_empty")]
+    pub expansion: Expansion,
 }
 
 /// Hit@5 is computed from `chunks`.
