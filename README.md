@@ -142,9 +142,10 @@ Switching embedding models requires `drew ingest --reembed`.
 Every model can run on [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/) with one API token: Explain on `@cf/qwen/qwen3.8-27b`, embeddings on `@cf/baai/bge-m3` (1024 dimensions), and System One on Clef Flash, `@cf/cloudflare/clef-flash`. Uncomment the "Hosted" block in `.env.example` (and comment out the local one), fill in the account id and token, then:
 
 ```sh
+docker compose up -d --wait db-hosted   # its own database on port 5434; the hosted block's DATABASE_URL points at it
 set -a; source .env; set +a        # in a fresh shell, so no variable from the old block lingers
 cargo run -- models check          # one call to each model: its model id, latency, and ok or the full error
-cargo run -- ingest --reembed      # the embedding model id changed, so every chunk is embedded again
+cargo run -- ingest                # a fresh corpus embedded by the hosted model; `db` keeps the local one
 cargo run -- eval run --golden eval/golden/daas.jsonl --out eval/results/daas-workers-ai.json --concurrency 2
 cargo run -- eval tune --results eval/results/daas-workers-ai.json --candidates candidates.json
 ```
