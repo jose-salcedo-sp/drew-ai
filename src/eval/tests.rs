@@ -5,7 +5,10 @@ use chrono::Utc;
 
 use super::{
     golden::{Expected, GoldenQuestion, YesNo},
-    metrics::{Baseline, EvalRun, Metric, MetricName, Progress, Results, evaluate, regressions},
+    metrics::{
+        Baseline, EvalRun, Metric, MetricName, MetricsReport, Progress, Results, evaluate,
+        regressions,
+    },
     tune::{Candidate, tune},
     *,
 };
@@ -712,6 +715,38 @@ async fn baseline_gate_passes_on_equal_metrics_and_fails_on_regression() {
     let found = regressions(&tolerant, &current);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].category, Some(CategoryKind::Boolean));
+}
+
+fn results_file<T: serde::de::DeserializeOwned>(name: &str) -> T {
+    read_json(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("eval/results")
+            .join(name),
+    )
+    .unwrap()
+}
+
+/// The gate as `drew eval run` applies it: the baseline parsed from its file, the current metrics computed from runs.
+fn gate(baseline: &str, current: &str) -> Vec<(Option<CategoryKind>, MetricName)> {
+    let baseline: Baseline = results_file(baseline);
+    let current = MetricsReport::of(&results_file::<Results>(current).runs);
+    regressions(&baseline, &current)
+        .iter()
+        .map(|r| (r.category, r.metric))
+        .collect()
+}
+
+#[test]
+fn baseline_gate_passes_equal_counts_read_back_from_a_results_file() {
+    // Both classify 54 of 58; v5 improves or keeps every other metric.
+    assert_eq!(
+        gate("daas-2026-10-21-v4.json", "daas-2026-10-22-v5.json"),
+        vec![]
+    );
+    assert_eq!(
+        gate("daas-2026-10-22-v5.json", "daas-2026-10-22-v5.json"),
+        vec![]
+    );
 }
 
 #[tokio::test]
