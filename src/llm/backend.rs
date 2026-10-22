@@ -11,7 +11,7 @@
 //! bearer key, and the account id is part of the URL. Its System One is the separate `workers-ai` backend, because
 //! `ai/run` differs from `/v1/systemone` in route, model selector and response envelope.
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use reqwest::Url;
 
@@ -44,6 +44,10 @@ pub struct EmbedArgs {
     /// `openai-compatible` only: bearer key, e.g. a Workers AI API token.
     #[arg(long, env = "DREW_EMBED_KEY", hide_env_values = true)]
     pub embed_key: Option<ApiKey>,
+    /// `openai-compatible` only: the most estimated tokens one request carries across its texts, for a server whose
+    /// limit spans a request (Workers AI's bge-m3: 60,000; use 50000). Unset: 64 texts a request whatever their size.
+    #[arg(long, env = "DREW_EMBED_MAX_BATCH_TOKENS")]
+    pub embed_max_batch_tokens: Option<NonZeroUsize>,
 }
 
 /// `DREW_EMBED_BACKEND`.
@@ -203,6 +207,7 @@ pub(crate) enum EmbedBackend {
         url: Url,
         model: String,
         key: Option<ApiKey>,
+        max_batch_tokens: Option<NonZeroUsize>,
     },
 }
 
@@ -218,9 +223,14 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_model,
                     embed_url,
                     embed_key,
+                    embed_max_batch_tokens,
                 } = args;
                 selected.reject(embed_url.as_ref(), "DREW_EMBED_URL")?;
                 selected.reject(embed_key.as_ref(), "DREW_EMBED_KEY")?;
+                selected.reject(
+                    embed_max_batch_tokens.as_ref(),
+                    "DREW_EMBED_MAX_BATCH_TOKENS",
+                )?;
                 Self::Bedrock {
                     model: embed_model.clone(),
                 }
@@ -231,11 +241,13 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_model,
                     embed_url,
                     embed_key,
+                    embed_max_batch_tokens,
                 } = args;
                 Self::OpenAiCompatible {
                     url: selected.require(embed_url.as_ref(), "DREW_EMBED_URL")?,
                     model: embed_model.clone(),
                     key: embed_key.clone(),
+                    max_batch_tokens: *embed_max_batch_tokens,
                 }
             }
         })
@@ -266,9 +278,16 @@ impl EmbedBackend {
     pub(crate) async fn build(self) -> eros::Result<Arc<dyn Embedder>> {
         Ok(match self {
             Self::Bedrock { model } => Arc::new(BedrockEmbedder::load(&model).await?),
-            Self::OpenAiCompatible { url, model, key } => {
-                Arc::new(OpenAiEmbedder::new(&url, model)?.with_key(key))
-            }
+            Self::OpenAiCompatible {
+                url,
+                model,
+                key,
+                max_batch_tokens,
+            } => Arc::new(
+                OpenAiEmbedder::new(&url, model)?
+                    .with_key(key)
+                    .with_max_batch_tokens(max_batch_tokens),
+            ),
         })
     }
 }
@@ -724,6 +743,50 @@ mod tests {
         assert_eq!(
             Endpoint::new(&base, DECIDE_PATH).to_string(),
             "https://system-one.dev/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn the_embed_batch_budget_is_a_positive_integer_for_openai_compatible_only() {
+        for bad in ["0", "-1", "50k"] {
+            assert!(
+                try_parse(&[
+                    "--explain-backend",
+                    "bedrock",
+                    "--system-one-backend",
+                    "none",
+                    "--embed-max-batch-tokens",
+                    bad,
+                ])
+                .is_err(),
+                "{bad}"
+            );
+        }
+        let mut cli = parse(&[
+            "--explain-backend",
+            "bedrock",
+            "--system-one-backend",
+            "none",
+            "--embed-url",
+            "http://localhost:11434/v1",
+            "--embed-max-batch-tokens",
+            "50000",
+        ]);
+        assert!(matches!(
+            EmbedBackend::try_from(&cli.embed),
+            Ok(EmbedBackend::OpenAiCompatible {
+                max_batch_tokens: Some(budget),
+                ..
+            }) if budget.get() == 50_000
+        ));
+        cli.embed.embed_backend = EmbedBackendKind::Bedrock;
+        cli.embed.embed_url = None;
+        assert_eq!(
+            EmbedBackend::try_from(&cli.embed)
+                .err()
+                .unwrap()
+                .to_string(),
+            "DREW_EMBED_MAX_BATCH_TOKENS is set, but DREW_EMBED_BACKEND=bedrock does not use it; unset it"
         );
     }
 

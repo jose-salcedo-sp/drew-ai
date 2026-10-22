@@ -1,7 +1,7 @@
 //! `ChatModel` and `Embedder` over an OpenAI-compatible HTTP API: Ollama, vLLM, llama.cpp, or Workers AI
 //! (`https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1`, with a bearer key).
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 use async_trait::async_trait;
 use eros::{Context, bail, ensure};
@@ -17,6 +17,13 @@ use super::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const EMBED_BATCH: usize = 64;
+/// Bytes per token in a batch's token estimate. Subword tokenizers such as bge-m3's average about 4 bytes per token
+/// on English prose and markdown, and CJK text is 3 bytes a character in UTF-8, so dividing by 3 overestimates the
+/// count and a packed batch stays under the budget. Text dense in digits or symbols can run nearer 1 byte a token,
+/// which is why the budget is set below the provider's limit.
+const BYTES_PER_TOKEN: usize = 3;
+/// How much of an oversized text an error quotes; an ingested text starts with its document title and heading.
+const TEXT_PREVIEW_BYTES: usize = 120;
 /// The chat route under the base URL.
 pub(crate) const CHAT_PATH: &str = "chat/completions";
 /// The embeddings route under the base URL.
@@ -220,12 +227,14 @@ impl ChatModel for OpenAiChat {
     }
 }
 
-/// [`Embedder`] over `POST {base_url}/embeddings`, in batches of 64. Ignores [`EmbedPurpose`].
+/// [`Embedder`] over `POST {base_url}/embeddings`, in batches of up to 64 texts and, when set, of an estimated
+/// token budget. Ignores [`EmbedPurpose`].
 pub struct OpenAiEmbedder {
     client: reqwest::Client,
     url: String,
     model: String,
     key: Option<ApiKey>,
+    max_batch_tokens: Option<NonZeroUsize>,
 }
 
 impl OpenAiEmbedder {
@@ -241,6 +250,7 @@ impl OpenAiEmbedder {
             url: endpoint(base_url, EMBEDDINGS_PATH),
             model: model.into(),
             key: None,
+            max_batch_tokens: None,
         })
     }
 
@@ -248,6 +258,54 @@ impl OpenAiEmbedder {
     pub fn with_key(self, key: Option<ApiKey>) -> Self {
         Self { key, ..self }
     }
+
+    /// Packs each request's texts under `max_batch_tokens` estimated tokens, for a server whose context limit
+    /// spans all of a request's inputs (Workers AI: 60,000). `None`: batches of 64 whatever their size.
+    pub fn with_max_batch_tokens(self, max_batch_tokens: Option<NonZeroUsize>) -> Self {
+        Self {
+            max_batch_tokens,
+            ..self
+        }
+    }
+}
+
+/// A conservative token count for `text`; see [`BYTES_PER_TOKEN`].
+fn estimated_tokens(text: &str) -> usize {
+    text.len().div_ceil(BYTES_PER_TOKEN)
+}
+
+/// `texts` cut, in order, into runs of at most [`EMBED_BATCH`] and, with a budget, at most `max_tokens` estimated
+/// tokens.
+///
+/// # Errors
+///
+/// When one text alone is over the budget; no batch is returned, so nothing is sent.
+fn batches(texts: &[String], max_tokens: Option<NonZeroUsize>) -> eros::Result<Vec<&[String]>> {
+    let Some(max_tokens) = max_tokens.map(NonZeroUsize::get) else {
+        return Ok(texts.chunks(EMBED_BATCH).collect());
+    };
+    let mut batches = Vec::new();
+    let (mut start, mut tokens) = (0, 0);
+    for (index, text) in texts.iter().enumerate() {
+        let estimate = estimated_tokens(text);
+        ensure!(
+            estimate <= max_tokens,
+            "text {index} of {} is about {estimate} tokens ({} bytes), over the {max_tokens}-token batch budget \
+             (DREW_EMBED_MAX_BATCH_TOKENS); it starts {:?}",
+            texts.len(),
+            text.len(),
+            &text[..text.floor_char_boundary(TEXT_PREVIEW_BYTES)]
+        );
+        if index > start && (tokens + estimate > max_tokens || index - start == EMBED_BATCH) {
+            batches.push(&texts[start..index]);
+            (start, tokens) = (index, 0);
+        }
+        tokens += estimate;
+    }
+    if start < texts.len() {
+        batches.push(&texts[start..]);
+    }
+    Ok(batches)
 }
 
 /// The vectors of an `embeddings` response, reordered by their `index`.
@@ -294,7 +352,7 @@ impl Embedder for OpenAiEmbedder {
 
     async fn embed(&self, texts: &[String], _purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
         let mut vectors = Vec::with_capacity(texts.len());
-        for batch in texts.chunks(EMBED_BATCH) {
+        for batch in batches(texts, self.max_batch_tokens)? {
             let body = json!({ "model": self.model, "input": batch });
             let response = post(
                 &self.client,
@@ -463,6 +521,51 @@ mod tests {
             .unwrap();
         assert_eq!(vectors[0][0], 1.0);
         assert_eq!(vectors[1][0], 2.0);
+    }
+
+    fn sizes(texts: &[String], max_tokens: usize) -> Vec<usize> {
+        batches(texts, NonZeroUsize::new(max_tokens))
+            .unwrap()
+            .iter()
+            .map(|batch| batch.len())
+            .collect()
+    }
+
+    #[test]
+    fn a_budget_packs_texts_in_order_under_its_estimate() {
+        let texts: Vec<String> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .zip([30, 30, 30, 60, 3, 90])
+            .map(|(letter, bytes)| letter.repeat(bytes))
+            .collect();
+        let packed = batches(&texts, NonZeroUsize::new(30)).unwrap();
+        assert_eq!(packed.concat(), texts);
+        for batch in &packed {
+            let tokens: usize = batch.iter().map(|text| estimated_tokens(text)).sum();
+            assert!(tokens <= 30, "{batch:?}");
+        }
+        assert_eq!(sizes(&texts, 30), [3, 2, 1]);
+    }
+
+    #[test]
+    fn a_budget_still_caps_a_batch_at_64_texts() {
+        let texts: Vec<String> = (0..130).map(|_| "a".into()).collect();
+        assert_eq!(sizes(&texts, 1_000_000), [64, 64, 2]);
+        assert_eq!(sizes(&texts, 0), [64, 64, 2]);
+        assert!(batches(&[], NonZeroUsize::new(10)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_text_over_the_budget_alone_is_named() {
+        let texts = ["Limits\nRate limits\n\nshort".to_owned(), "x".repeat(31)];
+        let error = batches(&texts, NonZeroUsize::new(10))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("text 1 of 2 is about 11 tokens (31 bytes)")
+                && error.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
+            "{error}"
+        );
     }
 
     #[test]

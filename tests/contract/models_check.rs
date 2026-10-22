@@ -64,6 +64,7 @@ fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
             embed_model: "@cf/baai/bge-m3".into(),
             embed_url: openai_base.clone(),
             embed_key: Some(TOKEN.parse().unwrap()),
+            embed_max_batch_tokens: None,
         },
         chat: ChatArgs {
             explain_backend: ChatBackendKind::OpenaiCompatible,

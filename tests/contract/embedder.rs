@@ -106,6 +106,8 @@ mod hash {
 }
 
 mod openai {
+    use std::num::NonZeroUsize;
+
     use drew::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, openai::OpenAiEmbedder};
     use serde_json::{Value, json};
     use wiremock::{
@@ -168,6 +170,85 @@ mod openai {
         }
 
         embedder_contract!(workers_ai);
+    }
+
+    mod token_budget {
+        use super::*;
+
+        /// A budget of about six of the contract's texts a request, so the suite's 100 texts span many batches.
+        async fn budgeted() -> Adapter {
+            let server = server(embeddings).await;
+            Adapter {
+                embedder: Box::new(
+                    embedder(&server).with_max_batch_tokens(NonZeroUsize::new(BUDGET)),
+                ),
+                _server: Some(server),
+            }
+        }
+
+        embedder_contract!(budgeted);
+    }
+
+    const BUDGET: usize = 20;
+
+    fn sent_inputs(requests: &[Request]) -> Vec<Vec<String>> {
+        requests
+            .iter()
+            .map(|request| {
+                request.body_json::<Value>().unwrap()["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|text| text.as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_budget_packs_each_request_under_it_in_input_order() {
+        let server = server(embeddings).await;
+        let texts: Vec<String> = (0..40).map(|i| format!("text {i}")).collect();
+
+        let vectors = embedder(&server)
+            .with_max_batch_tokens(NonZeroUsize::new(BUDGET))
+            .embed(&texts, EmbedPurpose::Document)
+            .await
+            .unwrap();
+
+        let sent = sent_inputs(&server.received_requests().await.unwrap());
+        assert!(sent.len() > 1, "{sent:?}");
+        for batch in &sent {
+            let estimate: usize = batch.iter().map(|text| text.len().div_ceil(3)).sum();
+            assert!(estimate <= BUDGET, "{batch:?}");
+        }
+        assert_eq!(sent.concat(), texts);
+        let expected: Vec<_> = texts.iter().map(|text| vector_of(text)).collect();
+        assert_eq!(vectors, expected);
+    }
+
+    #[tokio::test]
+    async fn a_text_over_the_budget_fails_before_any_request() {
+        let server = server(embeddings).await;
+        let texts = [
+            "Limits\nRate limits\n\nshort".to_owned(),
+            format!("LIMITS\nEvery limit\n\n{}", "x".repeat(200)),
+        ];
+
+        let error = embedder(&server)
+            .with_max_batch_tokens(NonZeroUsize::new(BUDGET))
+            .embed(&texts, EmbedPurpose::Document)
+            .await
+            .unwrap_err();
+
+        let report = format!("{error:#?}");
+        assert!(
+            report.contains("text 1 of 2")
+                && report.contains("LIMITS\\nEvery limit")
+                && report.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
+            "{report}"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
