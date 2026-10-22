@@ -5,12 +5,15 @@
 /// An in-memory [`Retriever`] for tests.
 #[cfg(any(test, feature = "testing"))]
 pub mod fakes;
+pub mod glossary;
 pub mod hybrid;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Chunk, ChunkId};
+
+use glossary::Expansion;
 
 /// One chunk in a retrieval result.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -41,4 +44,26 @@ pub trait Retriever: Send + Sync {
     ///
     /// When the backend fails, or the corpus was embedded with another model than the query embedder.
     async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>>;
+
+    /// [`Retriever::retrieve`], with the glossary expansion it searched with. A retriever that does not expand
+    /// questions returns an empty expansion.
+    ///
+    /// # Errors
+    ///
+    /// As [`Retriever::retrieve`].
+    async fn retrieve_expanded(&self, query: &str) -> eros::Result<Retrieval> {
+        Ok(Retrieval {
+            hits: self.retrieve(query).await?,
+            expansion: Expansion::default(),
+        })
+    }
+}
+
+/// What [`Retriever::retrieve_expanded`] found and searched with.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Retrieval {
+    /// As [`Retriever::retrieve`] returns them.
+    pub hits: Vec<Retrieved>,
+    /// The register entries the question matched and the terms they added.
+    pub expansion: Expansion,
 }

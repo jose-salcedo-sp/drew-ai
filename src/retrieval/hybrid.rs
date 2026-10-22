@@ -6,6 +6,9 @@
 //! and dominate the full-text ranking. Within the same identifier-match count, chunks rank by BM25 over `fts_prose`,
 //! with document frequencies and the average chunk length from the corpus statistics that `drew ingest` refreshes
 //! (`fts_prose_terms`, `fts_prose_corpus`).
+//!
+//! Before searching, the question gains the words of the glossary rows it matches ([`super::glossary`]); both the
+//! full-text query and the embedded query use the expanded text.
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
@@ -16,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
+    domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
 
-use super::{Relevance, Retrieved, Retriever};
+use super::{Relevance, Retrieval, Retrieved, Retriever, glossary::Glossary};
 
 /// Retrieval knobs; `drew eval` tunes them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +41,8 @@ pub struct HybridConfig {
     pub max_chunks_per_document: usize,
     /// Full-text ranking constants.
     pub bm25: Bm25,
+    /// Question expansion through the corpus's glossaries.
+    pub expansion: ExpansionConfig,
 }
 
 impl Default for HybridConfig {
@@ -49,6 +54,27 @@ impl Default for HybridConfig {
             fused_limit: 50,
             max_chunks_per_document: 3,
             bm25: Bm25::default(),
+            expansion: ExpansionConfig::default(),
+        }
+    }
+}
+
+/// [`HybridConfig::expansion`]: which documents are glossaries, and how many terms a question may gain from them. The
+/// question and its added terms are both the full-text query and the embedded query.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExpansionConfig {
+    /// Documents whose pipe tables are read as a [`Glossary`], in this order; none disables expansion.
+    pub documents: Vec<DocumentId>,
+    /// Most terms one question gains; 0 disables expansion.
+    pub max_terms: usize,
+}
+
+impl Default for ExpansionConfig {
+    fn default() -> Self {
+        Self {
+            documents: Vec::new(),
+            max_terms: 16,
         }
     }
 }
@@ -202,16 +228,44 @@ impl HybridRetriever {
         Ok(!found.is_empty())
     }
 
+    /// The current chunks of the configured glossary documents, parsed; empty when expansion is off.
+    #[eros::context("reading the glossary")]
+    async fn glossary(&self) -> eros::Result<Glossary> {
+        let config = &self.config.expansion;
+        if config.documents.is_empty() || config.max_terms == 0 {
+            return Ok(Glossary::default());
+        }
+        let documents: Vec<&str> = config.documents.iter().map(|id| id.0.as_str()).collect();
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, version, text FROM chunks
+             WHERE superseded_at IS NULL AND document_id = ANY($1)
+             ORDER BY array_position($1, document_id), ordinal",
+        )
+        .bind(&documents)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(Glossary::parse(rows.iter().map(|(id, version, text)| {
+            let source = ChunkRef {
+                id: ChunkId(id.clone()),
+                version: ChunkVersion(version.clone()),
+            };
+            (source, text.as_str())
+        })))
+    }
+
+    /// Full-text candidates for the prose words of `prose` (the question with its glossary expansion) and the
+    /// identifiers of `question`. Identifiers come from the question alone, since an identifier match ranks first.
     #[eros::context("full-text candidates")]
     async fn full_text_candidates(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        query: &str,
+        question: &str,
+        prose: &str,
     ) -> eros::Result<Vec<ChunkId>> {
         if self.config.full_text_candidates == 0 {
             return Ok(Vec::new());
         }
-        let identifiers = identifier_terms(query);
+        let identifiers = identifier_terms(question);
         // Identifier terms are [a-z0-9_] only, so quoting them cannot break tsquery syntax.
         let identifier_query = (!identifiers.is_empty()).then(|| {
             identifiers
@@ -264,7 +318,7 @@ impl HybridRetriever {
                       c.id
              LIMIT $4",
         )
-        .bind(query)
+        .bind(prose)
         .bind(identifier_query)
         .bind(&identifiers)
         .bind(i64::try_from(self.config.full_text_candidates)?)
@@ -335,13 +389,22 @@ impl HybridRetriever {
 #[async_trait]
 impl Retriever for HybridRetriever {
     async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>> {
+        Ok(self.retrieve_expanded(query).await?.hits)
+    }
+
+    async fn retrieve_expanded(&self, query: &str) -> eros::Result<Retrieval> {
         if query.trim().is_empty() || !self.check_embedding_model().await? {
-            return Ok(Vec::new());
+            return Ok(Retrieval::default());
         }
+        let expansion = self
+            .glossary()
+            .await?
+            .expand(query, self.config.expansion.max_terms);
+        let expanded = expansion.apply(query);
         let embedding = if self.config.vector_candidates > 0 {
             let mut vectors = self
                 .embedder
-                .embed(&[query.to_owned()], EmbedPurpose::Query)
+                .embed(std::slice::from_ref(&expanded), EmbedPurpose::Query)
                 .await
                 .context("embedding the query")?;
             Some(vectors.pop().context("embedder returned no vector")?)
@@ -353,7 +416,7 @@ impl Retriever for HybridRetriever {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *tx)
             .await?;
-        let full_text = self.full_text_candidates(&mut tx, query).await?;
+        let full_text = self.full_text_candidates(&mut tx, query, &expanded).await?;
         let vector = match embedding {
             Some(embedding) => self.vector_candidates(&mut tx, embedding).await?,
             None => Vec::new(),
@@ -364,7 +427,10 @@ impl Retriever for HybridRetriever {
         let rows = self.fetch_with_neighbours(&mut tx, &ids).await?;
         tx.commit().await?;
 
-        expand(&fused, rows, self.config.max_chunks_per_document)
+        Ok(Retrieval {
+            hits: expand(&fused, rows, self.config.max_chunks_per_document)?,
+            expansion,
+        })
     }
 }
 

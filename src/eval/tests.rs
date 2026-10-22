@@ -97,6 +97,7 @@ fn retrieve(ids: &[&str]) -> TraceEntry {
         passed(None),
         Some(TraceRecord::Retrieve(RetrieveRecord {
             chunks: ranked(ids),
+            expansion: Default::default(),
         })),
     )
 }
@@ -515,7 +516,10 @@ fn recall_counts_matches_only() {
         pair[1].context_for = Some(ChunkId(id.clone()));
         chunks.extend(pair);
     }
-    let record = RetrieveRecord { chunks };
+    let record = RetrieveRecord {
+        chunks,
+        expansion: Default::default(),
+    };
 
     assert_eq!(
         metrics::recall_at(metrics::RECALL_K, &q.relevant_chunks, &record),
